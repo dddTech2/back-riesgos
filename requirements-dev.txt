@@ -1,0 +1,6 @@
+-r requirements.txt
+
+pytest==8.4.1
+httpx==0.25.1
+black==23.11.0
+isort==5.12.0
