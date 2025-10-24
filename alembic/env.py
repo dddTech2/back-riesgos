@@ -18,6 +18,10 @@ config = context.config
 # This line sets up loggers basically.
 fileConfig(config.config_file_name)
 
+# Import settings and set the database URL
+from app.core.config import settings
+config.set_main_option('sqlalchemy.url', settings.DATABASE_URL)
+
 # add your model's MetaData object here
 # for 'autogenerate' support
 # from myapp import mymodel
