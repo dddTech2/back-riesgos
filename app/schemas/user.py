@@ -4,6 +4,7 @@ from app.schemas.role import Role
 
 class UserBase(BaseModel):
     email: EmailStr
+    full_name: Optional[str] = None
     is_active: Optional[bool] = True
     is_superuser: bool = False
     organization_id: Optional[int] = None

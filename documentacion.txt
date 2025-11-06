@@ -1,0 +1,3109 @@
+// =============================================================================
+// Code.gs - Lógica del Servidor para la Aplicación de Matriz de Riesgos
+// =============================================================================
+
+// --- CONFIGURACIÓN GLOBAL ---
+// Estos nombres DEBEN coincidir exactamente con los nombres de tus pestañas en Google Sheets.
+const HOJA_RIESGOS_NOMBRE = "Riesgos";
+const HOJA_CONTROLES_NOMBRE = "Controles";
+
+// --- FUNCIÓN PRINCIPAL DE LA APLICACIÓN WEB ---
+/**
+ * Se ejecuta cuando un usuario accede a la URL de la Web App.
+ * Sirve el archivo HTML principal que contiene la interfaz de usuario.
+ */
+function doGet(e) {
+  return HtmlService.createHtmlOutputFromFile("Index")
+    .setTitle("Matriz de Riesgos Interactiva")
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+// --- FUNCIÓN PRINCIPAL DE ACCESO A DATOS ---
+/**
+ * Obtiene y procesa TODOS los datos necesarios para la aplicación desde Google Sheets.
+ * Esta es la ÚNICA función que el frontend llamará para obtener sus datos iniciales.
+ * @return {string} Un objeto JSON como string que contiene los arrays de riesgos y controles, o un mensaje de error.
+ */
+function obtenerDatosCompletosParaApp() {
+  Logger.log("SERVIDOR: Iniciando obtención de datos completos...");
+  let resultadoFinal = {
+    riesgos: [],
+    controles: {}, // Los controles se devolverán como un objeto para búsqueda rápida por ID
+    error: null,
+  };
+
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+    // --- OBTENER Y PROCESAR RIESGOS ---
+    const hojaRiesgos = ss.getSheetByName(HOJA_RIESGOS_NOMBRE);
+    if (!hojaRiesgos)
+      throw new Error(
+        `Hoja de riesgos "${HOJA_RIESGOS_NOMBRE}" no encontrada.`
+      );
+
+    const datosRiesgos = hojaRiesgos.getDataRange().getValues();
+    if (datosRiesgos.length > 1) {
+      // Si hay más que solo la fila de encabezados
+      const encabezados = datosRiesgos.shift(); // Saca la primera fila (encabezados) y la guarda
+      const indices = mapearEncabezados(encabezados); // Crea un mapa de nombres a índices de columna
+
+      // Validar que las columnas esenciales existan en la hoja 'Riesgos'
+      if (
+        indices.ID_Riesgo === undefined ||
+        indices.Prob_Inherente === undefined ||
+        indices.Impacto_Inherente === undefined
+      ) {
+        throw new Error(
+          "Faltan encabezados esenciales ('ID_Riesgo', 'Prob_Inherente', 'Impacto_Inherente') en la hoja 'Riesgos'."
+        );
+      }
+
+      datosRiesgos.forEach((fila, indexFila) => {
+        const idRiesgo = fila[indices.ID_Riesgo];
+
+        if (
+          idRiesgo &&
+          idRiesgo
+            .toString()
+            .trim()
+            .match(/^R\d+$/i)
+        ) {
+          const probInh = parseFloat(fila[indices.Prob_Inherente]);
+          const impInh = parseFloat(fila[indices.Impacto_Inherente]);
+
+          if (
+            !isNaN(probInh) &&
+            probInh >= 1 &&
+            probInh <= 5 &&
+            !isNaN(impInh) &&
+            impInh >= 1 &&
+            impInh <= 5
+          ) {
+            let objRiesgo = {};
+            // Mapear TODAS las columnas a un objeto usando los encabezados originales
+            encabezados.forEach((encabezado, i) => {
+              if (encabezado && encabezado !== "") {
+                // Usamos el encabezado original sin normalizar como clave,
+                // ya que el frontend puede manejarlo si es consistente.
+                objRiesgo[encabezado] = fila[i];
+              }
+            });
+            resultadoFinal.riesgos.push(objRiesgo);
+          } else {
+            Logger.log(
+              `Riesgo '${idRiesgo}' (Fila Hoja ${
+                indexFila + 2
+              }) omitido por calificaciones inherentes inválidas o fuera de rango.`
+            );
+          }
+        }
+      });
+    }
+    Logger.log(
+      `SERVIDOR: ${resultadoFinal.riesgos.length} riesgos válidos procesados.`
+    );
+
+    // --- OBTENER Y PROCESAR CONTROLES ---
+    const hojaControles = ss.getSheetByName(HOJA_CONTROLES_NOMBRE);
+    if (!hojaControles)
+      throw new Error(
+        `Hoja de controles "${HOJA_CONTROLES_NOMBRE}" no encontrada.`
+      );
+
+    const datosControles = hojaControles.getDataRange().getValues();
+    if (datosControles.length > 1) {
+      const encabezadosCtrl = datosControles.shift();
+      const indicesCtrl = mapearEncabezados(encabezadosCtrl);
+
+      if (
+        indicesCtrl.ID_Control === undefined ||
+        indicesCtrl.Descripcion_Control === undefined
+      ) {
+        throw new Error(
+          "Faltan encabezados 'ID_Control' o 'Descripcion_Control' en la hoja 'Controles'."
+        );
+      }
+
+      datosControles.forEach((fila) => {
+        const idControl = fila[indicesCtrl.ID_Control];
+        if (idControl && idControl.toString().trim() !== "") {
+          const idNormalizado = idControl.toString().trim().toUpperCase();
+          let objControl = {};
+          encabezadosCtrl.forEach((enc, i) => {
+            if (enc && enc !== "") {
+              objControl[enc] = fila[i];
+            }
+          });
+          resultadoFinal.controles[idNormalizado] = objControl;
+        }
+      });
+    }
+    Logger.log(
+      `SERVIDOR: ${
+        Object.keys(resultadoFinal.controles).length
+      } controles válidos procesados.`
+    );
+  } catch (e) {
+    Logger.log(
+      `Error CRÍTICO en obtenerDatosCompletosParaApp: ${e.message}. Stack: ${e.stack}`
+    );
+    resultadoFinal.error = e.message;
+  }
+
+  return JSON.stringify(resultadoFinal);
+}
+
+// --- FUNCIÓN DE UTILIDAD ---
+/**
+ * Crea un objeto que mapea nombres de encabezado a su índice de columna.
+ * @param {Array<string>} encabezados - La fila de encabezados.
+ * @return {Object} Objeto como { 'ID_Riesgo': 0, 'Otro_Encabezado': 1, ... }
+ */
+function mapearEncabezados(encabezados) {
+  const mapa = {};
+  encabezados.forEach((encabezado, i) => {
+    if (
+      encabezado &&
+      typeof encabezado === "string" &&
+      encabezado.trim() !== ""
+    ) {
+      // Usamos el encabezado original como clave. JavaScript los maneja bien.
+      // Si quieres normalizarlos (quitar espacios, etc.), puedes hacerlo aquí.
+      // Por simplicidad y robustez, mantendremos los nombres originales.
+      mapa[encabezado.trim()] = i;
+    }
+  });
+  return mapa;
+}
+
+function obtenerCorreoUsuario() {
+  return Session.getActiveUser().getEmail();
+}
+
+function obtenerDatosParaWizard() {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const hojaRiesgos = ss.getSheetByName(HOJA_RIESGOS_NOMBRE);
+    if (!hojaRiesgos) throw new Error("Hoja de Riesgos no encontrada.");
+
+    const rangoDatos = hojaRiesgos.getDataRange().getValues();
+    const encabezados = rangoDatos.shift() || [];
+    const idxProceso = encabezados.indexOf("Proceso");
+    const idxDescRiesgo = encabezados.indexOf("Descripcion_Riesgo");
+    const idxIdRiesgo = encabezados.indexOf("ID_Riesgo");
+
+    if (idxProceso === -1 || idxDescRiesgo === -1 || idxIdRiesgo === -1) {
+      throw new Error(
+        "No se encontraron las columnas 'ID_Riesgo', 'Proceso' o 'Descripcion_Riesgo' en la hoja Riesgos."
+      );
+    }
+
+    const areas = new Set();
+    const riesgosExistentes = [];
+
+    rangoDatos.forEach((fila) => {
+      if (fila[idxProceso]) areas.add(fila[idxProceso]);
+      if (fila[idxIdRiesgo] && fila[idxDescRiesgo]) {
+        riesgosExistentes.push({
+          id: fila[idxIdRiesgo],
+          descripcion: fila[idxDescRiesgo],
+        });
+      }
+    });
+
+    return {
+      success: true,
+      areas: Array.from(areas),
+      riesgosExistentes: riesgosExistentes,
+    };
+  } catch (e) {
+    Logger.log("Error en obtenerDatosParaWizard: " + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Obtiene el correo del usuario activo para la autenticación.
+ */
+function obtenerCorreoUsuario() {
+  return Session.getActiveUser().getEmail();
+}
+
+/**
+ * Función de utilidad para generar el siguiente ID consecutivo (ej. R5 -> R6).
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet La hoja donde buscar.
+ * @param {number} columnIndex El índice de la columna que contiene los IDs.
+ * @param {string} prefix El prefijo del ID (ej. "R" o "C").
+ * @returns {string} El siguiente ID calculado.
+ */
+function getNextId(sheet, columnIndex, prefix) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) {
+    // Si solo hay encabezado o está vacía
+    return prefix + "1";
+  }
+  const range = sheet.getRange(2, columnIndex + 1, lastRow - 1, 1);
+  const values = range.getValues();
+  let maxId = 0;
+
+  values.forEach((row) => {
+    const id = row[0];
+    if (id && typeof id === "string" && id.toUpperCase().startsWith(prefix)) {
+      const num = parseInt(id.substring(prefix.length), 10);
+      if (!isNaN(num) && num > maxId) {
+        maxId = num;
+      }
+    }
+  });
+
+  return prefix + (maxId + 1);
+}
+
+/**
+ * Guarda los datos del wizard en las hojas de cálculo con la nueva estructura.
+ * @param {string} json String JSON con los datos del wizard.
+ * @returns {object} Un objeto con el resultado de la operación.
+ */
+function guardarDatosWizard(json) {
+  try {
+    const data = JSON.parse(json);
+    const fecha = new Date();
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+    const hojaRiesgos = ss.getSheetByName(HOJA_RIESGOS_NOMBRE);
+    const hojaControles = ss.getSheetByName(HOJA_CONTROLES_NOMBRE);
+
+    if (!hojaRiesgos || !hojaControles) {
+      throw new Error("No se encontraron las hojas 'Riesgos' o 'Controles'.");
+    }
+
+    const encabezadosRiesgos = hojaRiesgos
+      .getRange(1, 1, 1, hojaRiesgos.getLastColumn())
+      .getValues()[0];
+    const idxIdRiesgo = encabezadosRiesgos.indexOf("ID_Riesgo");
+
+    const encabezadosControles = hojaControles
+      .getRange(1, 1, 1, hojaControles.getLastColumn())
+      .getValues()[0];
+    const idxIdControl = encabezadosControles.indexOf("ID_Control");
+
+    if (idxIdRiesgo === -1 || idxIdControl === -1) {
+      throw new Error(
+        "Faltan las columnas 'ID_Riesgo' o 'ID_Control' en tus hojas."
+      );
+    }
+
+    // 1. CALCULAR IDS INICIALES
+    let proximoIdControlNum = parseInt(
+      getNextId(hojaControles, idxIdControl, "C").substring(1),
+      10
+    );
+    let proximoIdRiesgoNum = parseInt(
+      getNextId(hojaRiesgos, idxIdRiesgo, "R").substring(1),
+      10
+    );
+
+    const mapaControlesNuevos = {}; // Mapea el índice temporal del wizard al nuevo ID real
+
+    // 2. GUARDAR CONTROLES PRIMERO PARA OBTENER SUS IDs REALES
+    data.controles.forEach((c, index) => {
+      const nuevoIdControl = "C" + proximoIdControlNum;
+      mapaControlesNuevos[index] = nuevoIdControl; // Guardamos la correspondencia
+
+      const filaControl = [
+        nuevoIdControl, // ID_Control
+        c.nombre, // Descripcion_Control
+        c.tipo, // Tipo_Control
+        "", // Responsable_Control (no se pide en el wizard)
+        c.efectividadProb, // Control_Efect_Prob
+        c.efectividadImpact // Control_Efect_Impact
+      ];
+      hojaControles.appendRow(filaControl);
+      proximoIdControlNum++;
+    });
+
+    // 3. GUARDAR RIESGOS Y ASOCIAR LOS IDs DE CONTROLES YA CREADOS
+    data.riesgos.forEach((r) => {
+      const nuevoIdRiesgo = "R" + proximoIdRiesgoNum;
+
+      // Encontrar los IDs de controles asociados a este riesgo
+      const controlesAsociados = data.controles
+        .map((control, index) => ({ control, index }))
+        .filter((item) =>
+          item.control.riesgos.map(String).includes(String(r.wizardTempId))
+        );
+
+      const idsControlesAsociados = controlesAsociados
+        .map((item) => mapaControlesNuevos[item.index])
+        .join(", ");
+
+      // Calcular Prob_Residual e Impacto_Residual
+      const probInherente = r.probabilidad;
+      const impactoInherente = r.impacto;
+
+      const sumaEfectProb = controlesAsociados.reduce(
+        (acc, item) => acc + (parseInt(item.control.efectividadProb, 10) || 0),
+        0
+      );
+      const sumaEfectImpact = controlesAsociados.reduce(
+        (acc, item) => acc + (parseInt(item.control.efectividadImpact, 10) || 0),
+        0
+      );
+
+      let probResidual = probInherente == 1 ? 1 : probInherente - sumaEfectProb;
+      if (probResidual < 1) probResidual = 1;
+      let impactoResidual = impactoInherente == 1 ? 1 : impactoInherente - sumaEfectImpact;
+      if (impactoResidual < 1) impactoResidual = 1;
+
+      const filaRiesgo = [
+        nuevoIdRiesgo, // ID_Riesgo
+        data.proceso.area, // Proceso
+        data.proceso.descripcion, // Etapa_Proceso
+        r.descripcion, // Descripcion_Riesgo
+        "", // Causa_Riesgo (no se pide en el wizard)
+        idsControlesAsociados, // ID_Controles_Asociados
+        probInherente, // Prob_Inherente
+        impactoInherente, // Impacto_Inherente
+        probResidual, // Prob_Residual
+        impactoResidual // Impacto_Residual
+      ];
+      hojaRiesgos.appendRow(filaRiesgo);
+      proximoIdRiesgoNum++;
+    });
+
+    // 4. ACTUALIZAR RIESGOS EXISTENTES CON NUEVOS CONTROLES ASOCIADOS Y RECALCULAR RESIDUALES
+    data.controles.forEach((control, idxControl) => {
+      control.riesgos.forEach((riesgoId) => {
+        if (typeof riesgoId === "string" && riesgoId.match(/^R\d+$/i)) {
+          const datosRiesgos = hojaRiesgos.getDataRange().getValues();
+          const encabezados = datosRiesgos[0];
+          const idxIdRiesgo = encabezados.findIndex(
+            (e) => e && e.toString().trim().toUpperCase() === "ID_RIESGO"
+          );
+          const idxControlesAsoc = encabezados.findIndex(
+            (e) =>
+              e &&
+              e.toString().trim().toUpperCase() === "ID_CONTROLES_ASOCIADOS"
+          );
+          const idxProbInh = encabezados.findIndex(
+            (e) => e && e.toString().trim().toUpperCase() === "PROB_INHERENTE"
+          );
+          const idxImpactInh = encabezados.findIndex(
+            (e) => e && e.toString().trim().toUpperCase() === "IMPACTO_INHERENTE"
+          );
+          const idxProbRes = encabezados.findIndex(
+            (e) => e && e.toString().trim().toUpperCase() === "PROB_RESIDUAL"
+          );
+          const idxImpactRes = encabezados.findIndex(
+            (e) => e && e.toString().trim().toUpperCase() === "IMPACTO_RESIDUAL"
+          );
+
+          if (
+            idxIdRiesgo === -1 ||
+            idxControlesAsoc === -1 ||
+            idxProbInh === -1 ||
+            idxImpactInh === -1 ||
+            idxProbRes === -1 ||
+            idxImpactRes === -1
+          ) {
+            return;
+          }
+          for (let i = 1; i < datosRiesgos.length; i++) {
+            const idSheet = datosRiesgos[i][idxIdRiesgo]
+              ? datosRiesgos[i][idxIdRiesgo].toString().trim().toUpperCase()
+              : "";
+            if (idSheet === riesgoId.toString().trim().toUpperCase()) {
+              // Actualizar controles asociados
+              let controlesActuales = (datosRiesgos[i][idxControlesAsoc] || "")
+                .toString()
+                .split(",")
+                .map((s) => s.trim())
+                .filter(Boolean);
+              const nuevoIdControl = mapaControlesNuevos[idxControl];
+              if (!controlesActuales.includes(nuevoIdControl)) {
+                controlesActuales.push(nuevoIdControl);
+                hojaRiesgos
+                  .getRange(i + 1, idxControlesAsoc + 1)
+                  .setValue(controlesActuales.join(", "));
+              }
+              // Recalcular residuales
+              const probInh = parseInt(datosRiesgos[i][idxProbInh], 10) || 1;
+              const impactInh = parseInt(datosRiesgos[i][idxImpactInh], 10) || 1;
+
+              // Buscar todos los controles asociados y sumar efectividades
+              let sumaEfectProb = 0;
+              let sumaEfectImpact = 0;
+              controlesActuales.forEach((cid) => {
+                // Buscar el control en la hoja de controles
+                const datosControles = hojaControles.getDataRange().getValues();
+                const encabezadosCtrl = datosControles[0];
+                const idxIdCtrl = encabezadosCtrl.findIndex(
+                  (e) => e && e.toString().trim().toUpperCase() === "ID_CONTROL"
+                );
+                const idxEfectProb = encabezadosCtrl.findIndex(
+                  (e) =>
+                    e &&
+                    e.toString().trim().toUpperCase() === "CONTROL_EFECT_PROB"
+                );
+                const idxEfectImpact = encabezadosCtrl.findIndex(
+                  (e) =>
+                    e &&
+                    e.toString().trim().toUpperCase() === "CONTROL_EFECT_IMPACT"
+                );
+                for (let j = 1; j < datosControles.length; j++) {
+                  const idCtrlSheet = datosControles[j][idxIdCtrl]
+                    ? datosControles[j][idxIdCtrl].toString().trim().toUpperCase()
+                    : "";
+                  if (idCtrlSheet === cid.toString().trim().toUpperCase()) {
+                    sumaEfectProb += parseInt(datosControles[j][idxEfectProb], 10) || 0;
+                    sumaEfectImpact += parseInt(datosControles[j][idxEfectImpact], 10) || 0;
+                  }
+                }
+              });
+
+              let probResidual = probInh == 1 ? 1 : probInh - sumaEfectProb;
+              if (probResidual < 1) probResidual = 1;
+              let impactResidual = impactInh == 1 ? 1 : impactInh - sumaEfectImpact;
+              if (impactResidual < 1) impactResidual = 1;
+
+              hojaRiesgos.getRange(i + 1, idxProbRes + 1).setValue(probResidual);
+              hojaRiesgos.getRange(i + 1, idxImpactRes + 1).setValue(impactResidual);
+              break;
+            }
+          }
+        }
+      });
+    });
+
+    return {
+      success: true,
+      message: "¡Datos guardados exitosamente!",
+      summary: {
+        riesgosCreados: data.riesgos.length,
+        controlesCreados: data.controles.length,
+      },
+    };
+  } catch (e) {
+    Logger.log(
+      "ERROR CRÍTICO en guardarDatosWizard: " + e.message + " Stack: " + e.stack
+    );
+    return { success: false, error: "Error del servidor: " + e.message };
+  }
+}
+
+const ADMIN_USERS = [
+  { email: "facturacion@financrea.com", password: "ClaveFacturacion2024" },
+  { email: "otro@financrea.com", password: "ClaveOtro2024" },
+  { email: "dvancortes12julio2001@gmail.com", password: "1234" },
+];
+
+function validarUsuarioAdmin(email, password) {
+  email = (email || "").toLowerCase().trim();
+  password = (password || "").trim();
+  return ADMIN_USERS.some((u) => u.email === email && u.password === password);
+}
+
+
+<!DOCTYPE html>
+<html>
+
+<head>
+  <base target="_top" />
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet" />
+  <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css" />
+  <title>Matriz de Riesgos Interactiva</title>
+  <style>
+    :root {
+      --color-primario: #004085;
+      --color-fondo-header: #f8f9fa;
+      --color-borde: #dee2e6;
+    }
+
+    body {
+      background-color: #f4f7f9;
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+    }
+
+    h1,
+    h2,
+    h3,
+    h4 {
+      color: var(--color-primario);
+    }
+
+    .card {
+      border: none;
+    }
+
+    .card-header {
+      background-color: var(--color-fondo-header);
+      border-bottom: 1px solid var(--color-borde);
+    }
+
+    .main-title {
+      font-size: 2.1rem;
+      font-weight: 700;
+      letter-spacing: -1px;
+      margin-bottom: 0.2em;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5em;
+    }
+
+    .main-title i {
+      font-size: 2.2rem;
+      color: #0d6efd;
+    }
+
+    .section-title {
+      font-size: 1.2rem;
+      font-weight: 600;
+      margin-bottom: 0;
+      display: flex;
+      align-items: center;
+      gap: 0.5em;
+      color: #004085;
+    }
+
+    .card-header {
+      padding: 0.65rem 1.2rem;
+    }
+
+    .card-body {
+      padding: 1rem 1.2rem;
+    }
+
+    .card {
+      margin-bottom: 1.2rem;
+    }
+
+    /* Contenedores de la izquierda */
+    #riesgos-list-container {
+      max-height: 480px;
+      overflow-y: auto;
+    }
+
+    /* Tabla-lista de riesgos */
+    .risk-table {
+      width: 100%;
+      font-size: 0.97em;
+    }
+
+    .risk-table th,
+    .risk-table td {
+      padding: 0.55rem 0.6rem;
+    }
+
+    .risk-table tbody tr {
+      cursor: pointer;
+      border-bottom: 1px solid var(--color-borde);
+    }
+
+    .risk-table tr.selected {
+      background-color: #e7f1ff !important;
+      font-weight: bold;
+      border-left: 5px solid #0d6efd;
+      color: #003366;
+      transition: background 0.2s, border 0.2s;
+    }
+
+    .risk-map {
+      display: inline-block;
+    }
+
+    .map-wrapper {
+      position: relative;
+      display: inline-block;
+      margin-left: 24px;
+      vertical-align: top;
+    }
+
+    .prob-axis-label {
+      left: -24px;
+      font-size: 0.93em;
+    }
+
+    .impact-axis-label {
+      margin-top: 8px;
+      font-size: 1.1em;
+      color: #004085;
+    }
+
+    .risk-map table {
+      border-collapse: separate;
+      border-spacing: 2px;
+      table-layout: fixed;
+    }
+
+    .risk-map table th,
+    .risk-map table td {
+      width: 120px;
+      height: 40px;
+      text-align: center;
+      vertical-align: middle;
+      font-size: 1em;
+    }
+
+    .risk-map th,
+    .risk-map td {
+      border: 1px solid #ddd;
+      width: 100px;
+      height: 48px;
+      text-align: center;
+      vertical-align: middle;
+      padding: 3px;
+      font-size: 0.98em;
+      border-radius: 8px;
+      background-clip: padding-box;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
+      transition: background 0.2s;
+    }
+
+    .risk-map th {
+      background-color: #f8f9fa;
+      font-weight: bold;
+    }
+
+    .risk-map th[style*="writing-mode"] {
+      vertical-align: middle !important;
+      border-right: none !important;
+      background: #f8f9fa !important;
+      padding: 0 !important;
+      height: 100%;
+    }
+
+    .risk-item {
+      display: inline-block;
+      background-color: rgba(0, 0, 0, 0.5);
+      color: white !important;
+      font-weight: bold !important;
+      padding: 2px 7px;
+      margin: 1px;
+      border-radius: 5px;
+      cursor: pointer;
+      transition: transform 0.18s;
+      font-size: 0.98em;
+    }
+
+    .risk-item:hover,
+    .risk-item.highlight {
+      box-shadow: 0 0 0 2px #0d6efd;
+      transform: scale(1.08);
+    }
+
+    .riesgo-bajo {
+      background-color: #28a745;
+    }
+
+    .riesgo-moderado {
+      background-color: #ffc107;
+      color: #212529 !important;
+    }
+
+    .riesgo-alto,
+    .riesgo-extremo {
+      background-color: #dc3545 !important;
+      color: #fff;
+    }
+
+    .riesgo-invalido {
+      background-color: #f8f9fa;
+      color: #212529 !important;
+    }
+
+    #tooltip {
+      position: absolute;
+      display: none;
+      background-color: #343a40;
+      color: white;
+      padding: 10px 15px;
+      border-radius: 0.25rem;
+      box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
+      z-index: 1080;
+      font-size: 0.875rem;
+      max-width: 380px;
+    }
+
+    #tooltip h5 {
+      margin-top: 0;
+      color: #17a2b8;
+    }
+
+    /* Animaciones */
+    @keyframes spin {
+      100% {
+        transform: rotate(360deg);
+      }
+    }
+
+    @keyframes bounce {
+
+      0%,
+      100% {
+        transform: translateY(0);
+      }
+
+      50% {
+        transform: translateY(-10px);
+      }
+    }
+
+    @keyframes pulse {
+
+      0%,
+      100% {
+        opacity: 1;
+      }
+
+      50% {
+        opacity: 0.5;
+      }
+    }
+
+    .spin {
+      animation: spin 1.2s linear infinite;
+    }
+
+    .bounce {
+      animation: bounce 1s infinite;
+    }
+
+    .pulse {
+      animation: pulse 1.2s infinite;
+    }
+
+    .rotating-word {
+      display: inline-block;
+      min-width: 90px;
+      font-weight: 700;
+      color: #0d6efd;
+      animation: fadeInUp 0.6s;
+      transition: color 0.3s;
+    }
+
+    @keyframes fadeInUp {
+      from {
+        opacity: 0;
+        transform: translateY(18px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    .loading-icon-anim {
+      font-size: 2.2rem;
+      margin-bottom: 0.5rem;
+      display: inline-block;
+      transition: color 0.3s;
+    }
+
+    .loading-icon-spin {
+      animation: spin 1.2s linear infinite;
+      color: #0d6efd;
+    }
+
+    .loading-icon-bounce {
+      animation: bounce 1s infinite;
+      color: #dc3545;
+    }
+
+    .loading-icon-pulse {
+      animation: pulse 1.2s infinite;
+      color: #198754;
+    }
+
+    /* Responsive: reduce paddings y fuentes en pantallas pequeñas */
+    @media (max-width: 991px) {
+      .main-title {
+        font-size: 1.4rem;
+      }
+
+      .section-title {
+        font-size: 1rem;
+      }
+
+      .risk-map th,
+      .risk-map td {
+        width: 60px;
+        height: 32px;
+        font-size: 0.9em;
+      }
+
+      .risk-item {
+        font-size: 0.9em;
+        padding: 1px 4px;
+      }
+
+      .card-header,
+      .card-body {
+        padding: 0.7rem 0.7rem;
+      }
+    }
+
+    /* Estilos para la línea de tiempo */
+    #camino-riesgo-container {
+      padding: 3rem 0;
+      position: relative;
+      z-index: 1;
+    }
+
+    .timeline-bg-anim {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 220px;
+      z-index: 0;
+      pointer-events: none;
+      opacity: 0.5;
+    }
+
+    .main-timeline {
+      position: relative;
+      z-index: 1;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 1rem;
+    }
+
+    .timeline {
+      position: relative;
+      padding: 1rem 0;
+      border-left: 4px solid #004085;
+    }
+
+    .timeline-content {
+      padding-left: 2rem;
+      padding-right: 2rem;
+      padding-bottom: 1rem;
+      position: relative;
+    }
+
+    .timeline-icon {
+      position: absolute;
+      left: -1.5rem;
+      top: 0;
+      width: 2rem;
+      height: 2rem;
+      background-color: #fff;
+      border: 4px solid #004085;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.2rem;
+      color: #004085;
+    }
+
+    .title {
+      font-size: 1.2rem;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+      color: #004085;
+    }
+
+    .description {
+      font-size: 0.95rem;
+      color: #333;
+      margin-bottom: 1rem;
+    }
+
+    /* Estilos para el modal de la tabla de activos */
+    .modal-activos .modal-dialog {
+      max-width: 800px;
+    }
+
+    .modal-activos .table {
+      margin-bottom: 0;
+    }
+
+    .modal-activos .table th,
+    .modal-activos .table td {
+      vertical-align: middle;
+    }
+
+    .modal-activos .table .btn {
+      margin: 0;
+      font-size: 0.9rem;
+    }
+
+    /* Estilos para la línea de tiempo */
+    #camino-riesgo-container {
+      padding: 3rem 0;
+      position: relative;
+      z-index: 1;
+    }
+
+    .timeline-bg-anim {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 220px;
+      z-index: 0;
+      pointer-events: none;
+      opacity: 0.5;
+    }
+
+    .main-timeline {
+      position: relative;
+      z-index: 1;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 1rem;
+    }
+
+    .timeline {
+      position: relative;
+      padding: 1rem 0;
+      border-left: 4px solid #004085;
+    }
+
+    .timeline-content {
+      padding-left: 2rem;
+      padding-right: 2rem;
+      padding-bottom: 1rem;
+      position: relative;
+    }
+
+    .timeline-icon {
+      position: absolute;
+      left: -1.5rem;
+      top: 0;
+      width: 2rem;
+      height: 2rem;
+      background-color: #fff;
+      border: 4px solid #004085;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.2rem;
+      color: #004085;
+    }
+
+    .title {
+      font-size: 1.2rem;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+      color: #004085;
+    }
+
+    .description {
+      font-size: 0.95rem;
+      color: #333;
+      margin-bottom: 1rem;
+    }
+
+    /* Estilos para el modal de la tabla de activos */
+    .modal-activos .modal-dialog {
+      max-width: 800px;
+    }
+
+    .modal-activos .table {
+      margin-bottom: 0;
+    }
+
+    .modal-activos .table th,
+    .modal-activos .table td {
+      vertical-align: middle;
+    }
+
+    .modal-activos .table .btn {
+      margin: 0;
+      font-size: 0.9rem;
+    }
+
+    /* Nuevos estilos para el fondo animado de la línea de tiempo */
+    #camino-riesgo-container {
+      position: relative;
+      z-index: 1;
+    }
+
+    .timeline-bg-anim {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 220px;
+      z-index: 0;
+      pointer-events: none;
+      opacity: 0.5;
+    }
+
+    .main-timeline {
+      position: relative;
+      z-index: 1;
+    }
+
+    /* Animación bounce para los botones flotantes */
+    @keyframes boton-bounce {
+      0% {
+        transform: translateY(0);
+      }
+
+      30% {
+        transform: translateY(-12px);
+      }
+
+      50% {
+        transform: translateY(-8px);
+      }
+
+      70% {
+        transform: translateY(-12px);
+      }
+
+      100% {
+        transform: translateY(0);
+      }
+    }
+
+    .btn-bounce:hover,
+    .btn-bounce:focus {
+      animation: boton-bounce 0.5s;
+    }
+
+    /* Tooltip personalizado pegado al botón flotante */
+    .btn-fab-tooltip {
+      position: absolute;
+      right: 70px;
+      /* Ajusta según el tamaño del botón */
+      top: 50%;
+      transform: translateY(-50%);
+      background: #343a40;
+      color: #fff;
+      padding: 6px 14px;
+      border-radius: 8px;
+      font-size: 1rem;
+      white-space: nowrap;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.18s;
+      z-index: 2000;
+    }
+
+    .btn-bounce:hover+.btn-fab-tooltip,
+    .btn-bounce:focus+.btn-fab-tooltip {
+      opacity: 1;
+      pointer-events: auto;
+    }
+  </style>
+</head>
+
+<body>
+  <!-- Modal de Validación Inicial (NO SE PUEDE CERRAR) -->
+  <div class="modal fade" id="modalValidacionInicial" tabindex="-1" aria-labelledby="modalValidacionInicialLabel"
+    data-bs-backdrop="static" data-bs-keyboard="false" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header border-0 pb-2">
+          <h5 class="modal-title w-100 text-center" id="modalValidacionInicialLabel">
+            <i class="bi bi-shield-lock-fill text-primary me-2"></i>
+            Acceso al Sistema de Gestión de Riesgos
+          </h5>
+          <!-- NO hay botón de cerrar (X) -->
+        </div>
+        <div class="modal-body text-center py-4">
+          <div id="validacionStep1" class="validation-step">
+            <i class="bi bi-person-check" style="font-size: 3rem; color: #0d6efd;"></i>
+            <h6 class="mt-3 mb-3">Verificación de Acceso</h6>
+            <p class="text-muted mb-4">Para acceder al sistema, ingrese el código de acceso proporcionado por su
+              administrador.</p>
+
+            <form id="formValidacionInicial">
+              <div class="mb-3">
+                <label class="form-label fw-bold">Código de Acceso</label>
+                <input type="password" class="form-control form-control-lg text-center" id="codigoAcceso"
+                  placeholder="Ingrese el código" required style="letter-spacing: 2px; font-size: 1.2rem;">
+              </div>
+              <div id="errorValidacion" class="text-danger small mb-3" style="display: none;"></div>
+              <button type="submit" class="btn btn-primary btn-lg px-4">
+                <i class="bi bi-unlock-fill me-2"></i>Verificar Acceso
+              </button>
+            </form>
+          </div>
+
+          <div id="validacionStep2" class="validation-step d-none">
+            <i class="bi bi-check-circle-fill text-success" style="font-size: 3rem;"></i>
+            <h6 class="mt-3 mb-3 text-success">¡Acceso Autorizado!</h6>
+            <p class="text-muted mb-4">Bienvenido al Sistema de Gestión de Riesgos Operativos.</p>
+            <div class="spinner-border text-primary" role="status">
+              <span class="visually-hidden">Cargando...</span>
+            </div>
+            <p class="small text-muted mt-2">Cargando datos del sistema...</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="container-fluid">
+    <header class="my-3 text-center">
+      <div class="main-title">
+        <i class="bi bi-shield-lock-fill"></i>
+        Matriz Interactiva de Riesgos Operativos
+      </div>
+      <p class="lead text-muted mb-2" style="font-size: 1.07em">
+        Análisis de Riesgo Inherente y Residual
+      </p>
+    </header>
+    <div id="loadingMessage" class="alert alert-info text-center">
+      Cargando datos...
+    </div>
+    <div class="container py-5" id="camino-riesgo-container">
+      <div class="main-timeline">
+        <!-- FASE 1 -->
+        <div class="timeline" id="fase-0">
+          <div class="timeline-content">
+            <div class="timeline-icon">
+              <i class="bi bi-shield-check"></i>
+            </div>
+            <h3 class="title">
+              <i class="bi bi-sliders2-vertical me-2" style="font-size: 2.2rem"></i>
+              1. Parametrización de la Gestión de Riesgos
+            </h3>
+            <p class="description">
+              <i class="bi bi-gear-fill me-1 text-primary"></i>
+              Esta fase define los criterios y niveles que permitirán a la organización identificar cuáles riesgos deben
+              ser tratados y cuáles pueden ser aceptados sin intervención.
+            </p>
+            <ul>
+              <li>
+                <strong>
+                  <i class="bi bi-shield-exclamation text-warning me-1"></i>
+                  Medio y Bajo:
+                </strong>
+                Son aceptables, ya que no generan un impacto significativo sobre el funcionamiento o seguridad de los
+                procesos.
+              </li>
+              <li>
+                <strong>
+                  <i class="bi bi-exclamation-octagon-fill text-danger me-1"></i>
+                  Alto:
+                </strong>
+                Son riesgos considerados críticos. No son aceptables de manera automática. Deben ser tratados a menos
+                que se cumplan ciertas condiciones excepcionales y esto solo se permite bajo dos situaciones
+                específicas:
+                <div style="margin-left: 2em">
+                  <div>
+                    <i class="bi bi-cash-coin text-success me-1"></i>
+                    <span class="fw-bold">1.</span>
+                    Si tratar el riesgo cuesta más que las consecuencias que podría causar, se puede aceptar sin
+                    intervención.
+                  </div>
+                  <div>
+                    <i class="bi bi-slash-circle text-secondary me-1"></i>
+                    <span class="fw-bold">2.</span>
+                    Si hay recortes que impiden financiar el tratamiento del riesgo, este puede ser aceptado
+                    formalmente.
+                  </div>
+                </div>
+              </li>
+            </ul>
+            <button class="btn btn-primary" onclick="irAFase(1)">
+              Siguiente <i class="bi bi-arrow-right"></i>
+            </button>
+          </div>
+        </div>
+        <!-- FASE 2 -->
+        <div class="timeline" id="fase-1">
+          <div class="timeline-content">
+            <div class="timeline-icon">
+              <i class="bi bi-card-list"></i>
+            </div>
+            <h3 class="title">
+              <i class="bi bi-box-seam me-2" style="font-size: 2.2rem"></i>
+              2. Inventario de Activos
+            </h3>
+            <p class="description">
+              <strong><i class="bi bi-search text-primary"></i> 1. Identificación de Activos:</strong>
+              Se elabora una lista detallada de activos vinculados a los procesos críticos incluidos en el SGSI (Sistema
+              de Gestión de Seguridad de la Información). Cada activo debe tener:
+            <ul>
+              <li><i class="bi bi-card-text text-info"></i> <b>Nombre y descripción:</b> Ej. Base de datos de clientes,
+                servidor principal</li>
+              <li><i class="bi bi-cpu text-secondary"></i> <b>Sistema involucrado</b></li>
+              <li><i class="bi bi-box-seam text-success"></i> <b>Tipo de activo:</b> Ej. Información, Software, Físico
+                (equipos), Intangibles (reputación, imagen), Personas, Servicios</li>
+              <li><i class="bi bi-geo-alt text-danger"></i> <b>Tipo de ubicación:</b> Ej. Física, Logística,
+                Física-Logística</li>
+              <li><i class="bi bi-shield-lock text-warning"></i> <b>Nivel de confidencialidad:</b> Ej. No clasificado,
+                Confidencial de empleados, Confidencial de la compañía, Confidencial del cliente</li>
+              <li><i class="bi bi-person-badge text-primary"></i> <b>Propietario del activo:</b> Persona responsable de
+                su uso, seguridad, mantenimiento y control</li>
+              <li><i class="bi bi-shield-check text-success"></i> <b>Medidas de seguridad existentes</b></li>
+            </ul>
+            <strong><i class="bi bi-currency-dollar text-success"></i> 2. Valorización de Activos:</strong>
+            Una vez identificados, cada activo se valora según tres criterios clave (Confidencialidad, Integridad,
+            Disponibilidad - C/I/D):
+            <ul>
+              <li><i class="bi bi-123 text-info"></i> Se le asigna un valor. Si algún valor C/I/D es 5, se considera
+                <b>Muy Alto</b> automáticamente.
+              </li>
+              <li><i class="bi bi-calculator text-secondary"></i> Si todos son menores, se calcula un promedio simple de
+                los tres valores.<br>
+                <i class="bi bi-lightbulb text-warning"></i> <i>Ejemplo:</i> C = 4, I = 3, D = 2 ⇒ Valor promedio:
+                (4+3+2)/3 = 3 → Activo de valor Medio
+              </li>
+            </ul>
+            <strong><i class="bi bi-filter-circle text-primary"></i> 3. Selección de activos relevantes:</strong>
+            Según el valor total obtenido, los activos se clasifican así:
+            <ul>
+              <li><i class="bi bi-arrow-down-circle text-secondary"></i> <b>Muy Bajo:</b> 1.000 a 1.000</li>
+              <li><i class="bi bi-arrow-down text-info"></i> <b>Bajo:</b> 1.001 a 2.000</li>
+              <li><i class="bi bi-arrow-right text-warning"></i> <b>Medio:</b> 2.001 a 3.000</li>
+              <li><i class="bi bi-arrow-up text-primary"></i> <b>Alto:</b> 3.001 a 4.000</li>
+              <li><i class="bi bi-arrow-up-circle text-danger"></i> <b>Muy Alto:</b> 4.001 ia 5.000</li>
+            </ul>
+            </p>
+            <button class="btn btn-secondary" onclick="irAFase(0)">
+              <i class="bi bi-arrow-left"></i> Anterior
+            </button>
+            <button class="btn btn-primary" onclick="irAFase(2)">
+              Siguiente <i class="bi bi-arrow-right"></i>
+            </button>
+            <button type="button" class="btn btn-outline-info mt-2" data-bs-toggle="modal"
+              data-bs-target="#modalTablaActivos">
+              Ver Tabla de Tipos de Activo
+            </button>
+          </div>
+        </div>
+        <!-- FASE 3 -->
+        <div class="timeline" id="fase-2">
+          <div class="timeline-content">
+            <div class="timeline-icon">
+              <i class="bi bi-search"></i>
+            </div>
+            <h3 class="title">3. Identificación y Análisis de Riesgos</h3>
+            <p class="description"></p>
+            Aquí se identifican los riesgos asociados a los activos y se
+            analizan sus causas y consecuencias...
+            <ul>
+              <li>
+                <b><i class="bi bi-star-fill text-danger"></i> 1. Análisis de activos críticos:</b>
+                Se analizan solo los activos con valor <b>Alto</b> o <b>Muy Alto</b>.
+              </li>
+              <li>
+                <b><i class="bi bi-exclamation-triangle-fill text-warning"></i> 2. Identificación de riesgos
+                  asociados:</b>
+                Considerando <b>amenazas</b>, <b>vulnerabilidades</b>, <b>controles existentes</b> y <b>controles
+                  necesarios</b>.
+              </li>
+              <li>
+                <b><i class="bi bi-person-badge text-primary"></i> 3. Identificación del propietario del riesgo:</b>
+                Cada riesgo debe tener una persona responsable (dueño del riesgo) encargada de su seguimiento, control y
+                respuesta.
+              </li>
+              <li>
+                <b><i class="bi bi-diagram-3 text-info"></i> 4. Clasificación del riesgo según su origen:</b>
+                <ul>
+                  <li><b><i class="bi bi-globe2"></i> Externa:</b> Eventos fuera de la empresa.</li>
+                  <li><b><i class="bi bi-flag"></i> Estratégica:</b> Cambios en políticas o estructura.</li>
+                  <li><b><i class="bi bi-cpu"></i> Tecnológica:</b> Problemas de sistemas o IT.</li>
+                  <li><b><i class="bi bi-people"></i> Laboral:</b> Errores humanos, ausencias.</li>
+                  <li><b><i class="bi bi-building"></i> Organizacional:</b> Falta de controles, procesos mal diseñados.
+                  </li>
+                  <li><b><i class="bi bi-briefcase"></i> Empresarial:</b> Fallas en relaciones con clientes o
+                    proveedores.</li>
+                </ul>
+              </li>
+              <li>
+                <b><i class="bi bi-card-text"></i> 5. Descripción del riesgo y consecuencias:</b>
+                Se describe el riesgo y sus posibles consecuencias para ayudar en la toma de decisiones.
+              </li>
+            </ul>
+            </p>
+            <button class="btn btn-secondary" onclick="irAFase(1)">
+              <i class="bi bi-arrow-left"></i> Anterior
+            </button>
+            <button class="btn btn-primary" onclick="irAFase(3)">
+              Siguiente <i class="bi bi-arrow-right"></i>
+            </button>
+          </div>
+        </div>
+        <!-- FASE 4 -->
+        <div class="timeline" id="fase-3">
+          <div class="timeline-content">
+            <div class="timeline-icon">
+              <i class="bi bi-bar-chart-line"></i>
+            </div>
+            <h3 class="title">4. Evaluación y Tratamiento</h3>
+            <p class="description">
+              Esta fase se encarga de medir la <b>probabilidad</b> <i class="bi bi-lightning-charge text-info"></i> e
+              <b>impacto</b> <i class="bi bi-bar-chart text-danger"></i> de cada riesgo identificado en la fase
+              anterior, con el fin de determinar su nivel de criticidad y decidir si se deben tomar acciones.
+            <ul>
+              <li>
+                <b>1. Evaluar cada riesgo:</b>
+                <ul>
+                  <li>
+                    <b>Probabilidad de ocurrencia del riesgo</b> <i class="bi bi-lightbulb text-warning"></i>: Se mide
+                    del 1 al 4 según la frecuencia esperada:
+                    <ul>
+                      <li><b>Muy Alta</b> (76 a 100%)</li>
+                      <li><b>Alta</b> (51 a 75%)</li>
+                      <li><b>Media</b> (26 a 50%)</li>
+                      <li><b>Baja</b> (0 a 25%)</li>
+                    </ul>
+                  </li>
+                  <li>
+                    <b>Impacto del riesgo</b> <i class="bi bi-exclamation-triangle text-danger"></i>: Se mide del 1 al 4
+                    según las consecuencias que tendría si se materializa:
+                    <ul>
+                      <li><b>Muy Alto:</b> Pérdida crítica y daño total a imagen</li>
+                      <li><b>Alto</b></li>
+                      <li><b>Medio</b></li>
+                      <li><b>Bajo</b></li>
+                    </ul>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                <b>2. Decisión</b> <i class="bi bi-check2-circle text-success"></i>: Si el riesgo es <b>Alto</b> o
+                <b>Muy Alto</b>, se debe tratar. Si es <b>Bajo</b> o <b>Medio</b>, puede aceptarse o monitorearse.
+              </li>
+              <li>
+                <b>3. Aquí entran los mapas de riesgos</b> <i class="bi bi-grid-3x3-gap text-primary"></i>: Se
+                visualizan los riesgos en los mapas de calor para facilitar la priorización y toma de decisiones.
+              </li>
+            </ul>
+            </p>
+            <button class="btn btn-secondary" onclick="irAFase(2)">
+              <i class="bi bi-arrow-left"></i> Anterior
+            </button>
+            <button class="btn btn-primary" onclick="irAFase(4)">
+              Siguiente <i class="bi bi-arrow-right"></i>
+            </button>
+          </div>
+        </div>
+        <!-- FASE 5 -->
+        <div class="timeline" id="fase-4">
+          <div class="timeline-content">
+            <div class="timeline-icon">
+              <i class="bi bi-check2-circle"></i>
+            </div>
+            <h3 class="title">5. Seguimiento y Mejora Continua</h3>
+            <p class="description">
+              Esta fase define qué acciones se deben tomar frente a los riesgos evaluados como <b>Altos</b> o <b>Muy
+                Altos</b>, con el objetivo de reducir su impacto o controlar su probabilidad.
+            <ul>
+              <li>
+                <b>1. Definir una estrategia para cada riesgo:</b>
+                <i class="bi bi-lightbulb text-info"></i>
+                Se debe decidir si el riesgo se acepta, se mitiga o reduce con controles <i
+                  class="bi bi-shield-check text-success"></i>, se elimina <i class="bi bi-x-circle text-danger"></i>
+                (quitando la causa del riesgo) o se transfiere <i class="bi bi-arrow-repeat text-primary"></i> (pasando
+                el riesgo a un tercero).
+              </li>
+              <li>
+                <b>2. Crear un plan de acción:</b>
+                <i class="bi bi-list-check text-success"></i>
+                Se definen responsables <i class="bi bi-person-badge text-primary"></i>, fechas <i
+                  class="bi bi-calendar-event text-secondary"></i>, acciones y controles específicos para tratar el
+                riesgo.
+              </li>
+              <li>
+                <b>3. Documentar la estrategia:</b>
+                <i class="bi bi-journal-text text-warning"></i>
+                Cada acción tomada debe quedar documentada con:
+                <ul>
+                  <li><i class="bi bi-chat-left-text text-info"></i> Observaciones y detalles</li>
+                  <li><i class="bi bi-person-badge text-primary"></i> Responsables</li>
+                  <li><i class="bi bi-calendar-event text-secondary"></i> Fechas y costos</li>
+                  <li><i class="bi bi-pencil-square text-success"></i> Firma de aceptación de los riesgos residuales
+                    (los que quedan tras aplicar controles)</li>
+                </ul>
+              </li>
+            </ul>
+            </p>
+            <button class="btn btn-secondary" onclick="irAFase(3)">
+              <i class="bi bi-arrow-left"></i> Anterior
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="errorMessage" class="alert alert-danger text-center" style="display: none"></div>
+    =
+    <main id="app-container" class="row" style="display: none">
+      <!-- Columna Izquierda: Lista de Riesgos -->
+      <section class="col-lg-5">
+        <div class="card shadow-sm">
+          <div class="card-header">
+            <span class="section-title"><i class="bi bi-list-ul"></i> Riesgos Identificados</span>
+          </div>
+          <div id="riesgos-list-container"></div>
+        </div>
+      </section>
+      <!-- Columna Derecha: Mapas de Calor -->
+      <section class="col-lg-7">
+        <div class="card shadow-sm mb-3">
+          <div class="card-header">
+            <span class="section-title"><i class="bi bi-fire"></i> Mapa de Riesgo Inherente</span>
+          </div>
+          <div class="card-body text-center">
+            <div id="mapaRiesgoInherente" class="risk-map"></div>
+          </div>
+        </div>
+        <div class="card shadow-sm">
+          <div class="card-header">
+            <span class="section-title"><i class="bi bi-shield-check"></i> Mapa de Riesgo
+              Residual</span>
+          </div>
+          <div class="card-body text-center">
+            <div id="mapaRiesgoResidual" class="risk-map"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <!-- Panel lateral para detalles del riesgo -->
+  <div class="offcanvas offcanvas-end" tabindex="-1" id="detalleRiesgoPanel" aria-labelledby="detalleRiesgoPanelLabel">
+    <div class="offcanvas-header">
+      <h5 class="offcanvas-title" id="detalleRiesgoPanelLabel">
+        <i class="bi bi-exclamation-triangle-fill text-warning"></i> Detalle
+        del Riesgo
+      </h5>
+      <button type="button" class="btn-close text-reset" data-bs-dismiss="offcanvas" aria-label="Cerrar"></button>
+    </div>
+    <div class="offcanvas-body" id="detalle-riesgo-panel-body">
+      <div class="text-muted small">
+        Seleccione o pase el mouse sobre un riesgo para ver los detalles aquí.
+      </div>
+    </div>
+  </div>
+  <div id="tooltip"></div>
+  <!-- Botón flotante para abrir el wizard -->
+  <div
+    style="position: fixed; right: 32px; bottom: 32px; z-index: 1050; width: 60px; height: 60px; display: flex; align-items: center; justify-content: flex-end;">
+    <button id="btn-admin-wizard" class="btn btn-primary rounded-circle shadow-lg btn-bounce"
+      style="width: 60px; height: 60px; font-size: 2rem; position: relative;">
+      <i class="bi bi-plus-lg"></i>
+    </button>
+    <span class="btn-fab-tooltip">Nuevo Proceso / Riesgo</span>
+  </div>
+
+  <!-- Botón flotante para ir directo a las tablas -->
+  <div
+    style="position: fixed; right: 32px; bottom: 104px; z-index: 1050; width: 60px; height: 60px; display: flex; align-items: center; justify-content: flex-end;">
+    <button id="btn-ir-tablas" class="btn btn-outline-secondary rounded-circle shadow-lg btn-bounce"
+      style="width: 60px; height: 60px; font-size: 2rem; position: relative;" title="Ir directo a las tablas">
+      <i class="bi bi-table"></i>
+    </button>
+    <span class="btn-fab-tooltip">Ver Tablas de Riesgos</span>
+  </div>
+
+  <!-- Modal Wizard de Administración -->
+  <div class="modal fade" id="adminWizardModal" tabindex="-1" aria-labelledby="adminWizardLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header border-0 pb-0">
+          <div class="w-100">
+            <div class="progress mb-2" style="height: 6px">
+              <div id="wizardProgressBar" class="progress-bar bg-primary" style="width: 20%"></div>
+            </div>
+            <h5 class="modal-title d-flex align-items-center gap-2" id="adminWizardLabel">
+              <i class="bi bi-diagram-3"></i>
+              <span id="wizardStepTitle">Nuevo Proceso</span>
+            </h5>
+          </div>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+        </div>
+        <div class="modal-body">
+          <!-- Paso 1: Proceso -->
+          <form id="wizardStep1" class="wizard-step d-none">
+            <div class="mb-3">
+              <label class="form-label fw-bold"><i class="bi bi-diagram-3"></i> Área
+                <span class="text-danger">*</span></label>
+              <input type="text" class="form-control" id="areaNombre" list="listaAreasExistentes"
+                placeholder="Selecciona o escribe una nueva área" required />
+              <datalist id="listaAreasExistentes">
+                <!-- Opciones se llenan dinámicamente -->
+              </datalist>
+            </div>
+            <div class="mb-3">
+              <label class="form-label"><i class="bi bi-card-text"></i> Descripción del
+                Proceso</label>
+              <textarea class="form-control" id="procesoDescripcion" rows="2"
+                placeholder="Describe brevemente la etapa o actividad específica"></textarea>
+            </div>
+          </form>
+          <!-- Paso 2: Riesgos -->
+          <form id="wizardStep2" class="wizard-step d-none">
+            <div class="mb-3">
+              <label class="form-label fw-bold"><i class="bi bi-exclamation-triangle-fill"></i> Descripción
+                del Riesgo <span class="text-danger">*</span></label>
+              <input type="text" class="form-control" id="riesgoDescripcion" required
+                placeholder="Ej: Pérdida de información por fallo del disco duro" />
+            </div>
+            <div class="mb-3">
+              <label class="form-label fw-bold">¿Con qué frecuencia se ha presentado este riesgo o eventos similares en la organización o el sector en los últimos 2 años?</label>
+              <select class="form-select" id="preguntaProb1" required>
+                <option value="">Seleccione...</option>
+                <option value="1">Nunca (Es teóricamente posible pero muy improbable)</option>
+                <option value="2">Raramente (No en los últimos años, pero es posible)"</option>
+                <option value="3">Ocasionalmente (Al menos una vez al año)</option>
+                <option value="4">Constantemente (Varias veces al año)</option>
+              </select>
+            </div>
+            <div class="mb-3">
+              <label class="form-label fw-bold">Considerando las amenazas actuales (internas/externas), ¿qué tan expuesto está el proceso a que este riesgo se active?</label>
+              <select class="form-select" id="preguntaProb2" required>
+                <option value="">Seleccione...</option>
+                <option value="1">Exposición Mínima o Nula</option>
+                <option value="2">Exposición Moderada o Indirecta</option>
+                <option value="3">Exposición Frecuente</option>
+                <option value="4">Exposición Directa y Constante</option>
+              </select>
+            </div>
+            <div class="mb-3">
+              <label class="form-label fw-bold">¿Qué tan complejo o dependiente de factores manuales/humanos es el proceso donde reside este riesgo?</label>
+              <select class="form-select" id="preguntaProb3" required>
+                <option value="">Seleccione...</option>
+                <option value="1">Muy BajaSimple y Totalmente Automatizado</option>
+                <option value="2">Moderadamente Complejo y Mayormente Automatizado</option>
+                <option value="3">Complejo con algunas automatizaciones</option>
+                <option value="4">Muy Complejo y Altamente Manual</option>
+              </select>
+            </div>
+            <div class="mb-3">
+              <label class="form-label fw-bold">Si el riesgo se materializa, ¿cuál sería el impacto financiero directo (pérdidas, multas, costos de recuperación)?</label>
+              <select class="form-select" id="preguntaImp1" required>
+                <option value="">Seleccione...</option>
+                <option value="1">Bajo (Pérdida financiera menor o insignificante)</option>
+                <option value="2">Medio (Costos notables pero manejables)</option>
+                <option value="3">Alto (Pérdida financiera significativa)</option>
+                <option value="4">Muy Alto (Pérdida crítica que amenaza la viabilidad)</option>
+                <option value="5">Muy Alta</option>
+              </select>
+            </div>
+            <div class="mb-3">
+              <label class="form-label fw-bold">Si el riesgo se materializa, ¿qué tan severa sería la interrupción de las operaciones críticas del negocio?</label>
+              <select class="form-select" id="preguntaImp2" required>
+                <option value="">Seleccione...</option>
+                <option value="1">Muy BajaBajo (Interrupción mínima, casi imperceptible)</option>
+                <option value="2">Medio (Interrupción parcial, las operaciones continúan degradadas)</option>
+                <option value="3">Alto (Interrupción severa de operaciones)</option>
+                <option value="4">Muy Alto (Paralización total de operaciones críticas)</option>
+                <option value="5">Muy Alta</option>
+              </select>
+            </div>
+            <div class="mb-3">
+              <label class="form-label fw-bold">Pregunta 6 (Impacto 3)Si el riesgo se hace público, ¿cuál sería el daño a la imagen y confianza de la marca?</label>
+              <select class="form-select" id="preguntaImp3" required>
+                <option value="">Seleccione...</option>
+                <option value="1">Muy BajaBajo (Impacto reputacional nulo o muy limitado)</option>
+                <option value="2">Medio (Noticias negativas, pero recuperables)</option>
+                <option value="3">Alto (Daño significativo a la confianza del cliente)</option>
+                <option value="4">Muy Alto (Daño irreversible a la reputación, crisis mediática)</option>
+                <option value="5">Muy Alta</option>
+              </select>
+            </div>
+            <!-- Lista de riesgos agregados -->
+            <hr />
+            <div id="listaRiesgosAgregados" class="mb-2"></div>
+            <button type="button" class="btn btn-outline-primary btn-sm" id="btnAgregarRiesgo">
+              <i class="bi bi-plus-circle"></i> Agregar Riesgo
+            </button>
+          </form>
+          <!-- Paso 3: Controles -->
+          <form id="wizardStep3" class="wizard-step d-none">
+            <div class="mb-3">
+              <label class="form-label fw-bold"><i class="bi bi-shield-check"></i> Descripción del Control
+                <span class="text-danger">*</span></label>
+              <input type="text" class="form-control" id="controlNombre" required
+                placeholder="Ej: Backup diario en la nube" />
+            </div>
+            <div class="mb-3">
+              <label class="form-label fw-bold">
+                <i class="bi bi-lightbulb-fill text-info"></i> Tipo de Control
+                <span class="text-danger">*</span>
+              </label>
+              <select class="form-select" id="controlTipo" required>
+                <option value="">Seleccione...</option>
+                <option value="Preventivo">Preventivo</option>
+                <option value="Detectivo">Detectivo</option>
+                <option value="Correctivo">Correctivo</option>
+              </select>
+            </div>
+            <div class="mb-3">
+              <label class="form-label fw-bold">¿El diseño del control es adecuado para prevenir la causa raíz del riesgo?</label>
+              <select class="form-select" id="preguntaCtrlProb1" required>
+                <option value="">Seleccione...</option>
+                <option value="0">No Existe / Inadecuado (No previene la causa)</option>
+                <option value="0.5">Básico (Previene parcialmente o es fácil de evadir)</option>
+                <option value="1">Robusto (Diseñado específicamente para la causa raíz)</option>
+                <option value="1.5">Automatizado y Proactivo (Previene automáticamente y alerta)</option>
+
+              </select>
+            </div>
+            <div class="mb-3">
+              <label class="form-label fw-bold">¿El control está formalmente implementado, documentado y comunicado al personal relevante?</label>
+              <select class="form-select" id="preguntaCtrlProb2" required>
+                <option value="">Seleccione...</option>
+                <option value="0.3">No Implementado (Solo es una idea)</option>
+                <option value="0.7">Implementación Informal (Depende de personas, no documentado)</option>
+                <option value="1">Implementación Formal (Documentado y comunicado)</option>
+                <option value="1.5">Totalmente Integrado (Parte del flujo de trabajo estándar)</option>
+
+              </select>
+            </div>
+            <div class="mb-3">
+              <label class="form-label fw-bold">¿Con qué frecuencia se realizan pruebas o auditorías para asegurar que el control funciona como se espera?</label>
+              <select class="form-select" id="preguntaCtrlProb3" required>
+                <option value="">Seleccione...</option>
+                <option value="0">Nunca se prueba</option>
+                <option value="0.5">Anualmente o con poca frecuencia</option>
+                <option value="1">Periódicamente (Semestral/Trimestral)</option>
+                <option value="1.5">Monitoreo Continuo y Automatizado</option>
+
+              </select>
+            </div>
+            <div class="mb-3">
+              <label class="form-label fw-bold">¿El diseño del control permite detectar el evento a tiempo y activar un plan de respuesta para limitar el daño?</label>
+              <select class="form-select" id="preguntaCtrlImp1" required>
+                <option value="">Seleccione...</option>
+                <option value="0">No Existe / Inadecuado (No detecta ni limita el daño)</option>
+                <option value="0.5">Detectivo Básico (Detecta el evento después de ocurrido)</option>
+                <option value="1">Detectivo y Correctivo (Detecta y activa un plan de contención)</option>
+                <option value="1.5">Resiliente (Contiene el impacto y recupera la operación rápidamente)</option>
+              </select>
+            </div>
+            <div class="mb-3">
+              <label class="form-label fw-bold">¿Existe un plan de respuesta a incidentes o de continuidad de negocio claro y probado para cuando este riesgo se materialice?</label>
+              <select class="form-select" id="preguntaCtrlImp2" required>
+                <option value="">Seleccione...</option>
+                <option value="0">No hay plan</option>
+                <option value="0.5">Plan Básico (Pasos generales, no probado)</option>
+                <option value="1">Plan Detallado (Roles, responsabilidades y probado anualmente)</option>
+                <option value="1.5">Plan Robusto y Probado (Probado periódicamente con simulacros)</option>              </select>
+            </div>
+            <div class="mb-3">
+              <label class="form-label fw-bold">¿La organización ha asignado recursos (financieros, humanos, tecnológicos, seguros) para gestionar las consecuencias si el riesgo ocurre?</label>
+              <select class="form-select" id="preguntaCtrlImp3" required>
+                <option value="">Seleccione...</option>
+                <option value="0">Sin Recursos Asignados</option>
+                <option value="0.5">Recursos Limitados</option>
+                <option value="1">Recursos Suficientes Asignados</option>
+                <option value="1.5">Recursos Dedicados y Pólizas de Seguro Específicas</option>
+        </select>
+            </div>
+            <div class="mb-3">
+              <label class="form-label fw-bold">
+                <i class="bi bi-link-45deg"></i> Asociar a Riesgo(s)
+                <span class="text-danger">*</span>
+              </label>
+              <select class="form-select" id="controlRiesgosAsociados" multiple required size="5">
+                <!-- Opciones se llenan dinámicamente -->
+              </select>
+            </div>
+            <!-- Lista de controles agregados -->
+            <hr />
+            <div id="listaControlesAgregados" class="mb-2"></div>
+            <button type="button" class="btn btn-outline-primary btn-sm" id="btnAgregarControl">
+              <i class="bi bi-plus-circle"></i> Agregar Control
+            </button>
+          </form>
+          <!-- Paso 4: Revisión y Confirmación -->
+          <div id="wizardStep4" class="wizard-step d-none">
+            <h6 class="fw-bold mb-3">
+              <i class="bi bi-clipboard-check"></i> Resumen de lo que se va a
+              guardar
+            </h6>
+            <div id="wizardResumen"></div>
+          </div>
+          <!-- Paso 5: Mensaje de éxito -->
+          <div id="wizardSuccess" class="wizard-step d-none text-center py-4">
+            <i class="bi bi-check-circle-fill text-success" style="font-size: 3rem"></i>
+            <h5 class="mt-3" id="wizardSuccessTitle">
+              ¡Guardado exitosamente!
+            </h5>
+            <div class="mb-3" id="wizardSuccessResumen"></div>
+            <button type="button" class="btn btn-success" id="btnWizardCerrar" data-bs-dismiss="modal">
+              Finalizar
+            </button>
+          </div>
+        </div>
+        <div class="modal-footer border-0">
+          <button type="button" class="btn btn-secondary" id="btnWizardCancelar" data-bs-dismiss="modal">
+            Cancelar
+          </button>
+          <button type="button" class="btn btn-outline-primary d-none" id="btnWizardAnterior">
+            Anterior
+          </button>
+          <button type="button" class="btn btn-primary" id="btnWizardSiguiente">
+            Siguiente
+          </button>
+          <button type="button" class="btn btn-success d-none" id="btnWizardGuardar">
+            <i class="bi bi-save"></i> Guardar y finalizar
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal Edición -->
+  <div class="modal fade" id="modalEditarItem" tabindex="-1" aria-labelledby="modalEditarItemLabel" aria-hidden="true">
+    <div class="modal-dialog">
+      <form class="modal-content" id="formEditarItem">
+        <div class="modal-header">
+          <h5 class="modal-title" id="modalEditarItemLabel">Editar</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+        </div>
+        <div class="modal-body" id="modalEditarItemBody">
+          <!-- Aquí se inyecta el formulario dinámicamente -->
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+            Cancelar
+          </button>
+          <button type="submit" class="btn btn-primary">
+            Guardar cambios
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal de login admin -->
+  <div class="modal fade" id="modalLoginAdmin" tabindex="-1" aria-labelledby="modalLoginAdminLabel" aria-hidden="true">
+    <div class="modal-dialog">
+      <form class="modal-content" id="formLoginAdmin">
+        <div class="modal-header">
+          <h5 class="modal-title" id="modalLoginAdminLabel">
+            Acceso de Administrador
+          </h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label">Correo</label>
+            <input type="email" class="form-control" id="adminLoginEmail" required />
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Contraseña</label>
+            <input type="password" class="form-control" id="adminLoginPassword" required />
+          </div>
+          <div id="adminLoginError" class="text-danger small mb-2" style="display: none"></div>
+        </div>
+        <div class="modal-footer">
+          <button type="submit" class="btn btn-primary">Ingresar</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal Tabla de Activos -->
+  <div class="modal fade modal-activos" id="modalTablaActivos" tabindex="-1" aria-labelledby="modalTablaActivosLabel"
+    aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="modalTablaActivosLabel">Tipos de Activos</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+        </div>
+        <div class="modal-body">
+          <table class="table table-bordered table-hover">
+            <thead class="table-light">
+              <tr>
+                <th>Tipo</th>
+                <th>Descripción</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><i class="bi bi-info-circle text-primary"></i> Información</td>
+                <td>Bases de datos, archivos, documentación del sistema, manuales, material de capacitación,
+                  procedimientos de contingencia, etcétera.</td>
+              </tr>
+              <tr>
+                <td><i class="bi bi-cpu text-secondary"></i> Software</td>
+                <td>Aplicaciones, desarrollos, utilitarios, herramientas de desarrollo, etcétera.</td>
+              </tr>
+              <tr>
+                <td><i class="bi bi-hdd-network text-success"></i> Físico</td>
+                <td>Equipos de comunicaciones, equipo de cómputo, gabinetes, UPS, dispositivos, etcétera.</td>
+              </tr>
+              <tr>
+                <td><i class="bi bi-star text-warning"></i> Intangibles</td>
+                <td>Reputación, imagen.</td>
+              </tr>
+              <tr>
+                <td><i class="bi bi-person text-primary"></i> Personas</td>
+                <td>Capital humano, habilidades, experiencia.</td>
+              </tr>
+              <tr>
+                <td><i class="bi bi-gear text-info"></i> Servicios</td>
+                <td>Servicios de comunicaciones, servicios necesarios para la ejecución del negocio.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+  <script>
+    let todosLosRiesgos = [];
+    let todosLosControles = {};
+
+    let tipoEdicionActual = null; // "riesgo" o "control"
+    let idxEdicionActual = null;
+
+    const CODIGO_ACCESO_VALIDO = "Financrea2025*"; // Cambia este código
+
+    let modalValidacionInicial;
+    let accesoAutorizado = false;
+
+    // Función para mostrar el modal de validación al cargar la página
+    function mostrarValidacionInicial() {
+      modalValidacionInicial = new bootstrap.Modal(document.getElementById('modalValidacionInicial'), {
+        backdrop: 'static',  // No se puede cerrar haciendo clic fuera
+        keyboard: false      // No se puede cerrar con ESC
+      });
+      modalValidacionInicial.show();
+    }
+
+    // Función para validar el código de acceso
+    function validarCodigoAcceso(codigo) {
+      // Aquí puedes implementar una validación más compleja
+      // Por ejemplo, consultar a Google Sheets o hacer una validación más robusta
+      return codigo === CODIGO_ACCESO_VALIDO;
+    }
+
+    // Función para proceder después de la validación exitosa
+    function procederDespuesDeValidacion() {
+      document.getElementById('validacionStep1').classList.add('d-none');
+      document.getElementById('validacionStep2').classList.remove('d-none');
+
+      // Simular carga de datos (puedes ajustar el tiempo)
+      setTimeout(() => {
+        accesoAutorizado = true;
+        modalValidacionInicial.hide();
+        // Continuar con la carga normal de la aplicación
+        cargarDatosIniciales();
+      }, 2000);
+    }
+
+    // Event listener para el formulario de validación
+    document.addEventListener('DOMContentLoaded', function () {
+      // Mostrar modal de validación inmediatamente
+      mostrarValidacionInicial();
+
+      // Manejar el formulario de validación
+      document.getElementById('formValidacionInicial').addEventListener('submit', function (e) {
+        e.preventDefault();
+
+        const codigo = document.getElementById('codigoAcceso').value.trim();
+        const errorDiv = document.getElementById('errorValidacion');
+
+        if (!codigo) {
+          errorDiv.textContent = 'Por favor, ingrese el código de acceso.';
+          errorDiv.style.display = 'block';
+          return;
+        }
+
+        if (validarCodigoAcceso(codigo)) {
+          errorDiv.style.display = 'none';
+          procederDespuesDeValidacion();
+        } else {
+          errorDiv.textContent = 'Código de acceso incorrecto. Verifique e intente nuevamente.';
+          errorDiv.style.display = 'block';
+          document.getElementById('codigoAcceso').value = '';
+          document.getElementById('codigoAcceso').focus();
+        }
+      });
+    });
+
+    // Modificar la función window.onload existente
+    window.onload = function () {
+      // NO llamar cargarDatosIniciales() aquí, se llamará después de la validación
+      // cargarDatosIniciales(); // <-- Comentar o eliminar esta línea
+
+      // El modal de validación se mostrará automáticamente por el DOMContentLoaded
+    };
+
+    function mostrarMensaje(id, mensaje, tipo = "info", mostrar = true) {
+      const el = document.getElementById(id);
+      if (!el) {
+        console.error("Elemento no encontrado en mostrarMensaje: " + id);
+        return;
+      }
+      if (id === "loadingMessage") {
+        el.innerHTML = `
+                <div class="d-flex flex-column align-items-center justify-content-center py-4">
+                    <span id="loadingIcon" class="loading-icon-anim loading-icon-spin">
+                        <i class="bi bi-shield-lock-fill"></i>
+                    </span>
+                    <div class="fw-bold text-primary mt-2" style="font-size:1.2rem;">
+                        Cargando datos de <span id="rotatingWord" class="rotating-word">Procesos</span>
+                    </div>
+                </div>
+            `;
+        iniciarAnimacionCarga();
+      } else {
+        el.innerHTML = mensaje;
+      }
+      el.className = `alert alert-${tipo === "error" ? "danger" : tipo}`;
+      el.style.display = mostrar ? "block" : "none";
+    }
+
+    // Animación de palabra e icono rotatorio
+    function iniciarAnimacionCarga() {
+      const palabras = [
+        {
+          texto: "Procesos",
+          icon: "bi-diagram-3",
+          clase: "loading-icon-spin",
+        },
+        {
+          texto: "Riesgos",
+          icon: "bi-exclamation-triangle-fill",
+          clase: "loading-icon-bounce",
+        },
+        {
+          texto: "Controles",
+          icon: "bi-shield-check",
+          clase: "loading-icon-pulse",
+        },
+      ];
+      let idx = 0;
+      const wordEl = document.getElementById("rotatingWord");
+      const iconEl = document.getElementById("loadingIcon");
+      if (!wordEl || !iconEl) return;
+      setInterval(() => {
+        idx = (idx + 1) % palabras.length;
+        // Cambia palabra con animación
+        wordEl.classList.remove("rotating-word");
+        void wordEl.offsetWidth; // trigger reflow for animation
+        wordEl.textContent = palabras[idx].texto;
+        wordEl.classList.add("rotating-word");
+        // Cambia icono y animación
+        iconEl.className = `loading-icon-anim ${palabras[idx].clase}`;
+        iconEl.innerHTML = `<i class="bi ${palabras[idx].icon}"></i>`;
+      }, 1200);
+    }
+
+    function cargarDatosIniciales() {
+      mostrarMensaje(
+        "loadingMessage",
+        '<div class="spinner-border spinner-border-sm mr-2" role="status"></div>Cargando datos...',
+        "info",
+        true
+      );
+      const appContainer = document.getElementById("app-container");
+      if (appContainer) appContainer.style.display = "none";
+
+      google.script.run
+        .withSuccessHandler(function (jsonRespuesta) {
+          try {
+            const datosApp = JSON.parse(jsonRespuesta);
+            if (datosApp.error) throw new Error(datosApp.error);
+
+            todosLosRiesgos = datosApp.riesgos || [];
+            todosLosControles = datosApp.controles || {};
+
+            mostrarMensaje("loadingMessage", "", "info", false);
+            if (appContainer) appContainer.style.display = "flex";
+
+            if (todosLosRiesgos.length > 0) {
+              dibujarListaRiesgos(todosLosRiesgos);
+              dibujarMapaCalor(
+                todosLosRiesgos,
+                "mapaRiesgoInherente",
+                "Inherente"
+              );
+              dibujarMapaCalor(
+                todosLosRiesgos,
+                "mapaRiesgoResidual",
+                "Residual"
+              );
+            } else {
+              mostrarMensaje(
+                "errorMessage",
+                "No se encontraron riesgos válidos para mostrar.",
+                "warning",
+                true
+              );
+            }
+          } catch (e) {
+            console.error("CLIENTE: Error procesando respuesta:", e);
+            mostrarMensaje(
+              "errorMessage",
+              `Error al procesar datos: ${e.message}`,
+              "danger",
+              true
+            );
+            mostrarMensaje("loadingMessage", "", "info", false);
+          }
+        })
+        .withFailureHandler(function (error) {
+          console.error("CLIENTE: Falló la llamada al servidor:", error);
+          mostrarMensaje(
+            "errorMessage",
+            `Error de comunicación: ${error.message}`,
+            "danger",
+            true
+          );
+          mostrarMensaje("loadingMessage", "", "info", false);
+        })
+        .obtenerDatosCompletosParaApp();
+    }
+
+    // Dibuja la LISTA de riesgos (columna izquierda)
+    function dibujarListaRiesgos(riesgos) {
+      const container = document.getElementById("riesgos-list-container");
+      if (!container) return;
+      let tablaHtml =
+        '<table class="table table-hover risk-table"><thead><tr><th>ID</th><th>Descripción del Riesgo</th></tr></thead><tbody>';
+      riesgos.forEach((riesgo) => {
+        tablaHtml += `<tr id="fila-lista-${riesgo.ID_Riesgo}" onclick="seleccionarRiesgo('${riesgo.ID_Riesgo}')">
+                            <td>${riesgo.ID_Riesgo}</td>
+                            <td>${riesgo.Descripcion_Riesgo}</td>
+                          </tr>`;
+      });
+      tablaHtml += "</tbody></table>";
+      container.innerHTML = tablaHtml;
+    }
+
+    // Se activa al hacer clic en la tabla o al interactuar con el mapa
+    function seleccionarRiesgo(riesgoId) {
+      // Resalta en la lista
+      document
+        .querySelectorAll(".risk-table tr.selected")
+        .forEach((el) => el.classList.remove("selected"));
+      const filaSeleccionada = document.getElementById(
+        `fila-lista-${riesgoId}`
+      );
+      if (filaSeleccionada) filaSeleccionada.classList.add("selected");
+      // Resalta en el mapa
+      document
+        .querySelectorAll(".risk-item.highlight")
+        .forEach((el) => el.classList.remove("highlight"));
+      document
+        .querySelectorAll(`.risk-item[data-riesgoid="${riesgoId}"]`)
+        .forEach((el) => el.classList.add("highlight"));
+      mostrarDetallesRiesgo(riesgoId);
+    }
+
+    // Muestra los detalles en el panel lateral (offcanvas)
+    function mostrarDetallesRiesgo(riesgoId) {
+      const riesgo = todosLosRiesgos.find((r) => r.ID_Riesgo === riesgoId);
+      if (!riesgo) return;
+      // Procesa controles asociados
+      let controlHtml =
+        "<h6><i class='bi bi-shield-check text-success'></i> Controles Asociados</h6>";
+      const controlIds = riesgo.ID_Controles_Asociados
+        ? riesgo.ID_Controles_Asociados.split(",").map((id) =>
+          id.trim().toUpperCase()
+        )
+        : [];
+      if (
+        controlIds.length > 0 &&
+        controlIds[0] !== "" &&
+        !controlIds[0].startsWith("NO")
+      ) {
+        controlHtml += '<ul class="list-group mb-2">';
+        controlIds.forEach((id) => {
+          const control = todosLosControles[id];
+          if (control) {
+            controlHtml += `
+                        <li class="list-group-item d-flex justify-content-between align-items-start">
+                            <div>
+                                <i class="bi bi-shield-lock-fill text-primary"></i>
+                                <strong>${control.ID_Control}</strong> 
+                                <span class="badge bg-info text-dark ms-2">${control.Tipo_Control || "Sin tipo"
+              }</span>
+                                <div class="small text-muted w-200" style="white-space: normal; word-break: break-word;">${control.Descripcion_Control || ""
+              }</div>
+                            </div>
+                            <span class="badge bg-secondary ms-2">Efecto Prob: ${control.Control_Efect_Prob || 0
+              }</span>
+                            <span class="badge bg-secondary ms-2">Efecto Impact: ${control.Control_Efect_Impact || 0
+              }</span>
+                        </li>
+                    `;
+          } else {
+            controlHtml += `<li class="list-group-item text-danger">Control no encontrado: ${id}</li>`;
+          }
+        });
+        controlHtml += "</ul>";
+      } else {
+        controlHtml +=
+          '<p class="text-muted">No hay controles específicos asociados.</p>';
+      }
+      // Detalle del riesgo con todos los valores clave
+      const html = `
+            <div>
+                <h5 class="mb-2"><i class="bi bi-exclamation-triangle-fill text-warning"></i> ${riesgo.ID_Riesgo
+        }: ${riesgo.Descripcion_Riesgo}</h5>
+                <div class="mb-2"><i class="bi bi-diagram-3"></i> <strong>Proceso:</strong> ${riesgo.Proceso || 0
+        }</div>
+                <div class="mb-2"><i class="bi bi-gear"></i> <strong>Etapa:</strong> ${riesgo.Etapa_Proceso || 0
+        }</div>
+                <div class="row mb-2">
+                    <div class="col-6">
+                        <h6 class="mb-1"><i class="bi bi-lightning-charge"></i> Inherente</h6>
+                        <div><strong>Probabilidad:</strong> ${riesgo.Prob_Inherente || 0
+        }</div>
+                        <div><strong>Impacto:</strong> ${riesgo.Impacto_Inherente || 0
+        }</div>
+                    </div>
+                    <div class="col-6">
+                        <h6 class="mb-1"><i class="bi bi-shield-fill-check"></i> Residual</h6>
+                        <div><strong>Probabilidad:</strong> ${riesgo.Prob_Residual || 0
+        }</div>
+                        <div><strong>Impacto:</strong> ${riesgo.Impacto_Residual || 0
+        }</div>
+                    </div>
+                </div>
+                <h6><i class="bi bi-clipboard-check"></i> Tratamiento</h6>
+                <div class="mb-1"><strong>Decisión:</strong> ${riesgo.Trat_Decision || 0
+        }</div>
+                <div class="mb-2"><strong>Acciones:</strong> ${riesgo.Trat_Acciones || 0
+        }</div>
+                ${controlHtml}
+            </div>
+        `;
+      document.getElementById("detalle-riesgo-panel-body").innerHTML = html;
+      const offcanvas = new bootstrap.Offcanvas(
+        document.getElementById("detalleRiesgoPanel")
+      );
+      offcanvas.show();
+    }
+
+    // Dibuja UN mapa de calor (Inherente o Residual)
+    function dibujarMapaCalor(riesgos, divId, tipoRiesgo) {
+      const mainContainer = document.getElementById(divId);
+      mainContainer.innerHTML = "";
+
+      // Contenedor flex para eje Y y tabla
+      const flexContainer = document.createElement("div");
+      flexContainer.style.display = "flex";
+      flexContainer.style.alignItems = "center";
+
+      // Eje Y vertical (Probabilidad)
+      const ejeY = document.createElement("div");
+      ejeY.style.display = "flex";
+      ejeY.style.flexDirection = "column";
+      ejeY.style.alignItems = "center";
+      ejeY.style.justifyContent = "center";
+      ejeY.style.height = "60px"; // Ajusta según el alto de tu tabla
+      ejeY.style.marginRight = "8px";
+      ejeY.innerHTML = `
+        <span style="
+            writing-mode: vertical-rl;
+            transform: rotate(180deg);
+            font-weight: bold;
+            color: #004085;
+            font-size: 1.1em;
+            letter-spacing: 2px;
+            user-select: none;
+        ">Probabilidad</span>
+    `;
+
+      // Tabla del mapa de calor
+      const tabla = document.createElement("table");
+      tabla.style.borderCollapse = "separate";
+      tabla.style.borderSpacing = "2px";
+      tabla.style.tableLayout = "fixed";
+      tabla.style.background = "#fff";
+
+      const probMax = 5,
+        impactoMax = 5;
+
+      // Filas de la tabla
+      for (let p = probMax; p >= 1; p--) {
+        let rowHtml = `<tr>`;
+        // Número del eje Y
+        rowHtml += `<th style="background:#f8f9fa; font-weight:bold; width:36px;">${p}</th>`;
+        for (let imp = 1; imp <= impactoMax; imp++) {
+          const probKey =
+            tipoRiesgo === "Inherente" ? "Prob_Inherente" : "Prob_Residual";
+          const impactoKey =
+            tipoRiesgo === "Inherente"
+              ? "Impacto_Inherente"
+              : "Impacto_Residual";
+          const riesgosEnCelda = riesgos.filter(
+            (r) => r[probKey] == p && r[impactoKey] == imp
+          );
+          const colorClass = getColorClass(p, imp);
+          let cellContent = riesgosEnCelda
+            .map(
+              (r) =>
+                `<span class="risk-item" data-riesgoid="${r.ID_Riesgo}">${r.ID_Riesgo}</span>`
+            )
+            .join("");
+          if (cellContent === "") cellContent = " ";
+          rowHtml += `<td class="${colorClass}" style="height:48px;">${cellContent}</td>`;
+        }
+        rowHtml += `</tr>`;
+        tabla.insertAdjacentHTML("beforeend", rowHtml);
+      }
+
+      // Fila de números del eje X (Impacto) abajo
+      let impactoRow = `<tr><th></th>`;
+      for (let i = 1; i <= impactoMax; i++) {
+        impactoRow += `<th style="background:#f8f9fa; font-weight:bold;">${i}</th>`;
+      }
+      impactoRow += `</tr>`;
+      tabla.insertAdjacentHTML("beforeend", impactoRow);
+
+      // Agrega tabla al flex container
+      flexContainer.appendChild(ejeY);
+      flexContainer.appendChild(tabla);
+      mainContainer.appendChild(flexContainer);
+
+      // Etiqueta "Impacto" centrada debajo
+      const impactoLabelDiv = document.createElement("div");
+      impactoLabelDiv.className = "impact-axis-label";
+      impactoLabelDiv.style.textAlign = "center";
+      impactoLabelDiv.style.marginLeft = "60px";
+      impactoLabelDiv.style.fontWeight = "bold";
+      impactoLabelDiv.textContent = "Impacto";
+      mainContainer.appendChild(impactoLabelDiv);
+
+      // Eventos para los riesgos en el mapa: hover y click
+      mainContainer.querySelectorAll(".risk-item").forEach((item) => {
+        item.addEventListener("mouseover", function (e) {
+          mostrarTooltip(e, item.dataset.riesgoid);
+          document
+            .querySelectorAll(".risk-item.highlight")
+            .forEach((el) => el.classList.remove("highlight"));
+          document
+            .querySelectorAll(
+              `.risk-item[data-riesgoid="${item.dataset.riesgoid}"]`
+            )
+            .forEach((el) => el.classList.add("highlight"));
+          document
+            .querySelectorAll(".risk-table tr.selected")
+            .forEach((el) => el.classList.remove("selected"));
+          const fila = document.getElementById(
+            `fila-lista-${item.dataset.riesgoid}`
+          );
+          if (fila) fila.classList.add("selected");
+        });
+        item.addEventListener("mousemove", moverTooltip);
+        item.addEventListener("mouseout", function () {
+          ocultarTooltip();
+        });
+        item.addEventListener("click", function () {
+          seleccionarRiesgo(item.dataset.riesgoid);
+        });
+      });
+    }
+
+    function getColorClass(prob, impacto) {
+      if (
+        typeof prob !== "number" ||
+        typeof impacto !== "number" ||
+        prob < 1 ||
+        prob > 5 ||
+        impacto < 1 ||
+        impacto > 5
+      ) {
+        return "riesgo-invalido";
+      }
+      if (
+        (prob === 1 && impacto <= 3) ||
+        (prob === 2 && impacto <= 2) ||
+        (prob === 3 && impacto === 1) ||
+        (prob === 4 && impacto === 1)
+      ) {
+        return "riesgo-bajo";
+      }
+      if (
+        (prob === 5 && impacto >= 4) ||
+        (prob === 4 && impacto >= 4) ||
+        (prob === 3 && impacto >= 4) ||
+        (prob === 2 && impacto === 5)
+      ) {
+        return "riesgo-alto";
+      }
+      return "riesgo-moderado";
+    }
+
+    function mostrarTooltip(event, riesgoId) {
+      const riesgo = todosLosRiesgos.find((r) => r.ID_Riesgo === riesgoId);
+      if (!riesgo) return;
+      let tooltipHtml = `
+            <div>
+                <strong>${riesgo.ID_Riesgo}: ${riesgo.Descripcion_Riesgo
+        }</strong><br>
+                <i class="bi bi-diagram-3"></i> <strong>Proceso:</strong> ${riesgo.Proceso || 0
+        }<br>
+                <i class="bi bi-lightning-charge"></i> <strong>Inherente:</strong> P=${riesgo.Prob_Inherente || 0
+        }, I=${riesgo.Impacto_Inherente || 0}<br>
+                <i class="bi bi-shield-fill-check"></i> <strong>Residual:</strong> P=${riesgo.Prob_Residual || 0
+        }, I=${riesgo.Impacto_Residual || 0}<br>
+        `;
+      const controlIds = riesgo.ID_Controles_Asociados
+        ? riesgo.ID_Controles_Asociados.split(",").map((id) =>
+          id.trim().toUpperCase()
+        )
+        : [];
+      if (
+        controlIds.length > 0 &&
+        controlIds[0] !== "" &&
+        !controlIds[0].startsWith("NO")
+      ) {
+        tooltipHtml += `<hr><strong>Controles:</strong><ul>`;
+        controlIds.forEach((id) => {
+          const control = todosLosControles[id];
+          if (control) {
+            tooltipHtml += `<li>${control.ID_Control} (${control.Tipo_Control || "Sin tipo"
+              })<br><span class="small text-info">Efecto Prob: ${control.Control_Efect_Prob || 0
+              }, Efecto Impact: ${control.Control_Efect_Impact || 0
+              }</span></li>`;
+          }
+        });
+        tooltipHtml += `</ul>`;
+      }
+      tooltipHtml += `</div>`;
+      const tooltip = document.getElementById("tooltip");
+      tooltip.innerHTML = tooltipHtml;
+      tooltip.style.display = "block";
+      moverTooltip(event);
+    }
+
+    function moverTooltip(event) {
+      const tooltip = document.getElementById("tooltip");
+      if (tooltip.style.display !== "block") return;
+      let x = event.pageX + 10;
+      let y = event.pageY + 10;
+      const tooltipRect = tooltip.getBoundingClientRect();
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      if (x + tooltipRect.width > viewportWidth + window.scrollX) {
+        x = event.pageX - tooltipRect.width - 10;
+      }
+      if (x < window.scrollX) {
+        x = window.scrollX + 5;
+      }
+      if (y + tooltipRect.height > viewportHeight + window.scrollY) {
+        y = event.pageY - tooltipRect.height - 10;
+      }
+      if (y < window.scrollY) {
+        y = window.scrollY + 5;
+      }
+      tooltip.style.left = x + "px";
+      tooltip.style.top = y + "px";
+    }
+
+    function ocultarTooltip() {
+      document.getElementById("tooltip").style.display = "none";
+      document
+        .querySelectorAll(".risk-item.highlight")
+        .forEach((el) => el.classList.remove("highlight"));
+      document
+        .querySelectorAll(".risk-table tr.selected")
+        .forEach((el) => el.classList.remove("selected"));
+    }
+    const ADMIN_EMAIL = "ddd755505@gmail.com"; // Cambia por el correo real del admin
+
+    // Variable global para almacenar datos del wizard y datos existentes
+    let wizardData = {};
+    let wizardStep = 0;
+    let existingData = { areas: [], riesgosExistentes: [] };
+    let editIndex = -1; // -1 significa 'agregar nuevo', >= 0 significa 'editar existente'
+
+    // ========== MANEJO DE PASOS DEL WIZARD ==========
+
+    function mostrarWizardPaso(n) {
+      console.log("Entrando a mostrarWizardPaso con n =", n);
+      // Oculta todos los pasos
+      document
+        .querySelectorAll(".wizard-step")
+        .forEach((e) => e.classList.add("d-none"));
+
+      // Barra de progreso y título
+      const progress = [20, 40, 60, 80, 100, 100];
+      document.getElementById("wizardProgressBar").style.width =
+        progress[n] + "%";
+      const titulos = [
+        // "Iniciar sesión como administrador", // <-- Elimina esta línea
+        "Nuevo Proceso",
+        "Agregar Riesgos",
+        "Agregar Controles",
+        "Revisión y Confirmación",
+        "¡Guardado exitosamente!",
+      ];
+      document.getElementById("wizardStepTitle").innerText =
+        titulos[n - 1] || "";
+
+      // Botones
+      document
+        .getElementById("btnWizardAnterior")
+        .classList.toggle("d-none", n <= 1 || n === 5);
+      document
+        .getElementById("btnWizardSiguiente")
+        .classList.toggle("d-none", n >= 4);
+      document
+        .getElementById("btnWizardGuardar")
+        .classList.toggle("d-none", n !== 4);
+      document
+        .getElementById("btnWizardCancelar")
+        .classList.toggle("d-none", n === 5);
+
+      // Mostrar paso actual
+      document
+        .getElementById("wizardStep1")
+        .classList.toggle("d-none", n !== 1);
+      document
+        .getElementById("wizardStep2")
+        .classList.toggle("d-none", n !== 2);
+      document
+        .getElementById("wizardStep3")
+        .classList.toggle("d-none", n !== 3);
+      document
+        .getElementById("wizardStep4")
+        .classList.toggle("d-none", n !== 4);
+      document
+        .getElementById("wizardSuccess")
+        .classList.toggle("d-none", n !== 5);
+
+      wizardStep = n;
+      if (n === 3) actualizarOpcionesRiesgosEnControles();
+      if (n === 4) mostrarResumen();
+    }
+
+    // ========== INICIALIZACIÓN Y LIMPIEZA ==========
+    function limpiarWizard() {
+      wizardData = {
+        proceso: {},
+        riesgos: [],
+        controles: [],
+        usuario: wizardData.usuario, // Mantener el usuario autenticado
+      };
+      editIndex = -1;
+      document.getElementById("wizardStep1").reset();
+      document.getElementById("wizardStep2").reset();
+      document.getElementById("wizardStep3").reset();
+      document.getElementById("listaRiesgosAgregados").innerHTML = "";
+      document.getElementById("listaControlesAgregados").innerHTML = "";
+      document.getElementById("wizardResumen").innerHTML = "";
+      document.getElementById("wizardSuccessResumen").innerHTML = "";
+      document.getElementById("btnAgregarRiesgo").innerHTML =
+        '<i class="bi bi-plus-circle"></i> Agregar Riesgo';
+      document.getElementById("btnAgregarControl").innerHTML =
+        '<i class="bi bi-plus-circle"></i> Agregar Control';
+      mostrarWizardPaso(1); // Empezar en el paso 1 después de limpiar
+    }
+
+    function inicializarDatosDelWizard() {
+      google.script.run
+        .withSuccessHandler((data) => {
+          if (data.success) {
+            existingData = data;
+            const datalist = document.getElementById("listaAreasExistentes");
+            datalist.innerHTML = data.areas
+              .map((area) => `<option value="${area}"></option>`)
+              .join("");
+          } else {
+            alert("Error al cargar datos iniciales: " + data.error);
+          }
+        })
+        .withFailureHandler((err) =>
+          alert("Error de comunicación al cargar datos: " + err.message)
+        )
+        .obtenerDatosParaWizard();
+    }
+
+    // ========== AUTENTICACIÓN ==========
+    function autenticarAdmin() {
+      const statusDiv = document.getElementById("authStatus");
+      statusDiv.innerHTML =
+        '<span class="text-info">Verificando usuario...</span>';
+      google.script.run
+        .withSuccessHandler((email) => {
+          wizardData.usuario = email;
+          // Aquí puedes añadir una lógica de validación si lo necesitas
+          statusDiv.innerHTML = `<span class="text-success"><i class="bi bi-check-circle"></i> Autenticado como <b>${email}</b></span>`;
+          setTimeout(() => mostrarWizardPaso(1), 1000);
+        })
+        .withFailureHandler(() => {
+          statusDiv.innerHTML =
+            '<span class="text-danger">No se pudo verificar el usuario.</span>';
+        })
+    };
+
+    // --- PASO 2: RIESGOS ---
+    function manejarAgregarEditarRiesgo() {
+      const descripcion = document.getElementById("riesgoDescripcion").value.trim();
+      const prob1 = parseInt(document.getElementById("preguntaProb1").value, 10);
+      const prob2 = parseInt(document.getElementById("preguntaProb2").value, 10);
+      const prob3 = parseInt(document.getElementById("preguntaProb3").value, 10);
+      const imp1 = parseInt(document.getElementById("preguntaImp1").value, 10);
+      const imp2 = parseInt(document.getElementById("preguntaImp2").value, 10);
+      const imp3 = parseInt(document.getElementById("preguntaImp3").value, 10);
+
+      // Validación
+      if (!descripcion) {
+        alert("Debes ingresar la descripción del riesgo.");
+        document.getElementById("riesgoDescripcion").focus();
+        return;
+      }
+      if (
+        isNaN(prob1) || isNaN(prob2) || isNaN(prob3) ||
+        isNaN(imp1) || isNaN(imp2) || isNaN(imp3)
+      ) {
+        alert("Debes responder todas las preguntas de probabilidad e impacto.");
+        return;
+      }
+
+      // Calcular promedios
+      const probabilidad = Math.round((prob1 + prob2 + prob3) / 3);
+      const impacto = Math.round((imp1 + imp2 + imp3) / 3);
+      console.log(probabilidad, impacto);
+      const riesgo = {
+        descripcion,
+        probabilidad,
+        impacto,
+        preguntasProb: [prob1, prob2, prob3],
+        preguntasImp: [imp1, imp2, imp3],
+      };
+
+      if (editIndex > -1) {
+        riesgo.wizardTempId = wizardData.riesgos[editIndex].wizardTempId;
+        wizardData.riesgos[editIndex] = riesgo;
+      } else {
+        riesgo.wizardTempId = wizardData.riesgos.length;
+        wizardData.riesgos.push(riesgo);
+      }
+
+      editIndex = -1;
+      document.getElementById("btnAgregarRiesgo").innerHTML =
+        '<i class="bi bi-plus-circle"></i> Agregar Riesgo';
+      document.getElementById("wizardStep2").reset();
+      mostrarRiesgosAgregados();
+    }
+
+    function eliminarRiesgo(idx) {
+      if (confirm("¿Estás seguro de que quieres eliminar este riesgo?")) {
+        wizardData.riesgos.splice(idx, 1);
+        // Re-asignar IDs temporales para mantener la consistencia
+        wizardData.riesgos.forEach((r, i) => (r.wizardTempId = i));
+        mostrarRiesgosAgregados();
+      }
+    }
+
+    function mostrarRiesgosAgregados() {
+      const cont = document.getElementById("listaRiesgosAgregados");
+      cont.innerHTML = wizardData.riesgos
+        .map(
+          (r, i) => `
+            <div class="card card-body mb-2 py-2 px-3 d-flex flex-row align-items-center gap-2">
+                <i class="bi bi-exclamation-triangle-fill text-warning"></i>
+                <span class="flex-grow-1">${r.descripcion}</span>
+                <span class="badge bg-info text-dark">P:${r.probabilidad}</span>
+                <span class="badge bg-info text-dark">I:${r.impacto}</span>
+                <button class="btn btn-sm btn-link text-primary p-0" onclick="editarRiesgo(${i})" title="Editar"><i class="bi bi-pencil-square" style="font-size:1.2rem;"></i></button>
+                <button class="btn btn-sm btn-link text-danger p-0" onclick="eliminarRiesgo(${i})" title="Eliminar"><i class="bi bi-trash" style="font-size:1.2rem;"></i></button>
+            </div>`
+        )
+        .join("");
+    }
+
+    function validarRiesgos() {
+      if (wizardData.riesgos.length === 0) {
+        alert("Debes agregar al menos un riesgo para continuar.");
+        return false;
+      }
+      return true;
+    }
+
+    // --- PASO 3: CONTROLES ---
+    function actualizarOpcionesRiesgosEnControles() {
+      const select = document.getElementById("controlRiesgosAsociados");
+      select.innerHTML = "";
+      // Primero los riesgos nuevos del wizard
+      wizardData.riesgos.forEach((r, i) => {
+        const opt = document.createElement("option");
+        opt.value = r.wizardTempId;
+        opt.textContent = r.descripcion;
+        select.appendChild(opt);
+      });
+      // Luego los riesgos existentes, evitando duplicados por descripción
+      existingData.riesgosExistentes.forEach((r) => {
+        if (
+          !wizardData.riesgos.some((nr) => nr.descripcion === r.descripcion)
+        ) {
+          const opt = document.createElement("option");
+          opt.value = r.id;
+          opt.textContent = `${r.id} - ${r.descripcion}`;
+          select.appendChild(opt);
+        }
+      });
+      // Inicializa select2 para que el dropdown esté pegado al select
+      $(select).select2({
+        dropdownParent: $(select).parent(), // El dropdown se ancla al contenedor del select
+        width: "100%",
+        placeholder: "Selecciona uno o varios riesgos",
+      });
+    }
+
+    function manejarAgregarEditarControl() {
+      const nombre = document.getElementById("controlNombre").value.trim();
+      const tipo = document.getElementById("controlTipo").value;
+      const riesgosAsociados = Array.from(
+        document.getElementById("controlRiesgosAsociados").selectedOptions
+      ).map((opt) => opt.value);
+
+      // Preguntas de probabilidad e impacto
+      const prob1 = parseFloat(document.getElementById("preguntaCtrlProb1").value, 10);
+      const prob2 = parseFloat(document.getElementById("preguntaCtrlProb2").value, 10);
+      const prob3 = parseFloat(document.getElementById("preguntaCtrlProb3").value, 10);
+      const imp1 = parseFloat(document.getElementById("preguntaCtrlImp1").value, 10);
+      const imp2 = parseFloat(document.getElementById("preguntaCtrlImp2").value, 10);
+      const imp3 = parseFloat(document.getElementById("preguntaCtrlImp3").value, 10);
+
+      if (
+        !nombre ||
+        !tipo ||
+        riesgosAsociados.length === 0 ||
+        isNaN(prob1) || isNaN(prob2) || isNaN(prob3) ||
+        isNaN(imp1) || isNaN(imp2) || isNaN(imp3)
+      ) {
+        alert("Completa todos los campos obligatorios del control y responde todas las preguntas.");
+        return;
+      }
+
+      // Calcular promedios
+      const efectividadProb = Math.round((prob1 + prob2 + prob3) / 3);
+      const efectividadImpact = Math.round((imp1 + imp2 + imp3) / 3);
+
+      const control = {
+        nombre,
+        tipo,
+        efectividadProb,
+        efectividadImpact,
+        preguntasProb: [prob1, prob2, prob3],
+        preguntasImp: [imp1, imp2, imp3],
+        riesgos: riesgosAsociados,
+      };
+
+      if (editIndex > -1) {
+        wizardData.controles[editIndex] = control;
+      } else {
+        wizardData.controles.push(control);
+      }
+
+      editIndex = -1;
+      document.getElementById("btnAgregarControl").innerHTML =
+        '<i class="bi bi-plus-circle"></i> Agregar Control';
+      document.getElementById("wizardStep3").reset();
+      mostrarControlesAgregados();
+      actualizarOpcionesRiesgosEnControles();
+    }
+    function eliminarControl(idx) {
+      if (confirm("¿Estás seguro de que quieres eliminar este control?")) {
+        wizardData.controles.splice(idx, 1);
+        mostrarControlesAgregados();
+      }
+    }
+
+    function mostrarControlesAgregados() {
+      const cont = document.getElementById("listaControlesAgregados");
+      cont.innerHTML = wizardData.controles
+        .map(
+          (c, i) => `
+          <div class="card card-body mb-2 py-2 px-3 d-flex flex-row align-items-center gap-2">
+              <i class="bi bi-shield-check text-success"></i>
+              <span class="flex-grow-1">${c.nombre}</span>
+              <span class="badge bg-info text-dark">${c.tipo}</span>
+              <span class="badge bg-secondary">Efect. Prob: ${c.efectividadProb}</span>
+              <span class="badge bg-secondary">Efect. Impact: ${c.efectividadImpact}</span>
+              <button class="btn btn-sm btn-link text-primary p-0" onclick="editarControl(${i})" title="Editar"><i class="bi bi-pencil-square" style="font-size:1.2rem;"></i></button>
+              <button class="btn btn-sm btn-link text-danger p-0" onclick="eliminarControl(${i})" title="Eliminar"><i class="bi bi-trash" style="font-size:1.2rem;"></i></button>
+          </div>`
+        )
+        .join("");
+    }
+
+    function validarControles() {
+      if (wizardData.controles.length === 0) {
+        alert("Debes agregar al menos un control para continuar.");
+        return false;
+      }
+      return true;
+    }
+
+    // --- PASO 4: RESUMEN ---
+    function mostrarResumen() {
+      console.log("mostrarResumen");
+      let html = `
+          <div class="card card-body mb-3">
+              <h6 class="fw-bold"><i class="bi bi-diagram-3 text-primary"></i> Proceso</h6>
+              <strong>Área:</strong> ${wizardData.proceso.area}<br>
+              <strong>Descripción:</strong> ${wizardData.proceso.descripcion || "<em>No especificada</em>"
+        }
+          </div>
+          
+          <h6 class="fw-bold mt-4"><i class="bi bi-exclamation-triangle-fill text-warning"></i> Riesgos a Crear</h6>
+          ${wizardData.riesgos
+          .map(
+            (r) => `
+              <div class="card card-body mb-2 p-2">
+                  <strong>${r.descripcion}</strong>
+                  <div class="d-flex justify-content-between align-items-center mt-1">
+                      <div>
+                          <span class="badge bg-info text-dark">Prob: ${r.probabilidad
+              }</span>
+                          <span class="badge bg-info text-dark">Imp: ${r.impacto
+              }</span>
+                      </div>
+                      <small class="text-muted">Controles: ${wizardData.controles
+                .filter((c) => c.riesgos.includes(r.wizardTempId))
+                .map((c) => c.nombre)
+                .join(", ") || "<em>Ninguno</em>"
+              }
+                      </small>
+                  </div>
+              </div>`
+          )
+          .join("")}
+
+          <h6 class="fw-bold mt-4"><i class="bi bi-shield-check text-success"></i> Controles a Crear</h6>
+          ${wizardData.controles
+          .map(
+            (c) => `
+              <div class="card card-body mb-2 p-2">
+                  <strong>${c.nombre}</strong>
+                  <div class="d-flex justify-content-between align-items-center mt-1">
+                      <div>
+                          <span class="badge bg-info text-dark">${c.tipo}</span>
+                          <span class="badge bg-secondary">Efect. Prob: ${c.efectividadProb}</span>
+                          <span class="badge bg-secondary">Efect. Impact: ${c.efectividadImpact}</span>
+                      </div>
+                      <small class="text-muted">Asociado a: ${c.riesgos.length} riesgo(s)</small>
+                  </div>
+              </div>`
+          )
+          .join("")}`;
+      document.getElementById("wizardResumen").innerHTML = html;
+    }
+
+    // ========== GUARDAR FINAL ==========
+    function guardarWizard() {
+      const btnGuardar = document.getElementById("btnWizardGuardar");
+      btnGuardar.disabled = true;
+      btnGuardar.innerHTML =
+        '<span class="spinner-border spinner-border-sm"></span> Guardando...';
+
+      google.script.run
+        .withSuccessHandler((response) => {
+          if (response.success) {
+            document.getElementById("wizardSuccessTitle").innerText =
+              response.message;
+            document.getElementById("wizardSuccessResumen").innerHTML = `
+                          <div class="alert alert-light text-start">
+                              Se crearon <strong>${response.summary.riesgosCreados}</strong> riesgo(s) y <strong>${response.summary.controlesCreados}</strong> control(es).
+                          </div>`;
+            mostrarWizardPaso(5); // Ir a la pantalla de éxito
+          } else {
+            alert("Error al guardar: " + response.error);
+          }
+          btnGuardar.disabled = false;
+          btnGuardar.innerHTML =
+            '<i class="bi bi-save"></i> Guardar y finalizar';
+        })
+        .withFailureHandler((err) => {
+          alert("Error de comunicación con el servidor: " + err.message);
+          btnGuardar.disabled = false;
+          btnGuardar.innerHTML =
+            '<i class="bi bi-save"></i> Guardar y finalizar';
+        })
+        .guardarDatosWizard(JSON.stringify(wizardData));
+    }
+
+    // ========== EVENTOS ==========
+    document.addEventListener("DOMContentLoaded", function () {
+      const adminModal = new bootstrap.Modal(
+        document.getElementById("adminWizardModal")
+      );
+
+      document.getElementById("btn-admin-wizard").onclick = function () {
+        limpiarWizard();
+        inicializarDatosDelWizard();
+        adminModal.show();
+        mostrarWizardPaso(1);
+      };
+      document.getElementById("btnWizardSiguiente").onclick = function () {
+        if (wizardStep === 1 && guardarPaso1()) mostrarWizardPaso(2);
+        else if (wizardStep === 2 && validarRiesgos()) mostrarWizardPaso(3);
+        else if (wizardStep === 3 && validarControles()) mostrarWizardPaso(4);
+      };
+
+      document.getElementById("btnWizardAnterior").onclick = function () {
+        if (wizardStep > 1) mostrarWizardPaso(wizardStep - 1);
+      };
+
+      document.getElementById("btnWizardGuardar").onclick = guardarWizard;
+      document.getElementById("btnWizardCancelar").onclick = () =>
+        adminModal.hide();
+
+      document.getElementById("btnAgregarRiesgo").onclick =
+        manejarAgregarEditarRiesgo;
+      document.getElementById("btnAgregarControl").onclick =
+        manejarAgregarEditarControl;
+    });
+
+    document.addEventListener("DOMContentLoaded", function () {
+      document.getElementById("btn-ir-tablas").onclick = function () {
+        // Muestra el contenedor de tablas directamente
+        document.getElementById("app-container").style.display = "flex";
+        // Opcional: oculta el camino si quieres
+        // document.getElementById("camino-riesgo-container").style.display = "none";
+        // Hace scroll suave a la sección de tablas
+        document
+          .getElementById("app-container")
+          .scrollIntoView({ behavior: "smooth" });
+      };
+    });
+    function editarRiesgo(idx) {
+      tipoEdicionActual = "riesgo";
+      idxEdicionActual = idx;
+      const r = wizardData.riesgos[idx];
+      document.getElementById("modalEditarItemLabel").innerText =
+        "Editar Riesgo";
+      document.getElementById("modalEditarItemBody").innerHTML = `
+        <div class="mb-2">
+                       <label class="form-label">Descripción</label>
+            <textarea class="form-control" id="editRiesgoDescripcion">${r.descripcion || ""
+        }</textarea>
+        </div>
+        <div class="mb-2">
+            <label class="form-label">Probabilidad</label>
+            <select class="form-select" id="editRiesgoProbabilidad">
+                <option value="1" ${r.probabilidad == 1 ? "selected" : ""
+        }>Muy Baja</option>
+                <option value="2" ${r.probabilidad == 2 ? "selected" : ""
+        }>Baja</option>
+                <option value="3" ${r.probabilidad == 3 ? "selected" : ""
+        }>Media</option>
+                <option value="4" ${r.probabilidad == 4 ? "selected" : ""
+        }>Alta</option>
+                <option value="5" ${r.probabilidad == 5 ? "selected" : ""
+        }>Muy Alta</option>
+            </select>
+        </div>
+        <div class="mb-2">
+            <label class="form-label">Impacto</label>
+            <select class="form-select" id="editRiesgoImpacto">
+                <option value="1" ${r.impacto == 1 ? "selected" : ""
+        }>Muy Bajo</option>
+                <option value="2" ${r.impacto == 2 ? "selected" : ""
+        }>Bajo</option>
+                <option value="3" ${r.impacto == 3 ? "selected" : ""
+        }>Medio</option>
+                <option value="4" ${r.impacto == 4 ? "selected" : ""
+        }>Alto</option>
+                <option value="5" ${r.impacto == 5 ? "selected" : ""
+        }>Muy Alto</option>
+            </select>
+        </div>
+    `;
+      // No hay select2 aquí, pero si agregas un select múltiple, inicialízalo aquí.
+      var modal = new bootstrap.Modal(
+        document.getElementById("modalEditarItem")
+      );
+      modal.show();
+    }
+
+    function editarControl(idx) {
+      tipoEdicionActual = "control";
+      idxEdicionActual = idx;
+      const c = wizardData.controles[idx];
+      document.getElementById("modalEditarItemLabel").innerText =
+        "Editar Control";
+      document.getElementById("modalEditarItemBody").innerHTML = `
+        <div class="mb-2">
+            <label class="form-label">Nombre</label>
+            <input type="text" class="form-control" id="editControlNombre" value="${c.nombre
+        }">
+        </div>
+        <div class="mb-2">
+            <label class="form-label">Tipo</label>
+            <select class="form-select" id="editControlTipo">
+                <option value="Preventivo" ${c.tipo === "Preventivo" ? "selected" : ""
+        }>Preventivo</option>
+                <option value="Detectivo" ${c.tipo === "Detectivo" ? "selected" : ""
+        }>Detectivo</option>
+                <option value="Correctivo" ${c.tipo === "Correctivo" ? "selected" : ""
+        }>Correctivo</option>
+            </select>
+        </div>
+        <div class="mb-2">
+            <label class="form-label">Efectividad</label>
+            <select class="form-select" id="editControlEfectividad">
+                <option value="1" ${c.efectividad == 1 ? "selected" : ""
+        }>Muy Baja</option>
+                <option value="2" ${c.efectividad == 2 ? "selected" : ""
+        }>Baja</option>
+                <option value="3" ${c.efectividad == 3 ? "selected" : ""
+        }>Media</option>
+                <option value="4" ${c.efectividad == 4 ? "selected" : ""
+        }>Alta</option>
+                <option value="5" ${c.efectividad == 5 ? "selected" : ""
+        }>Muy Alta</option>
+            </select>
+        </div>
+        <div class="mb-2">
+            <label class="form-label">Riesgos asociados</label>
+            <select class="form-select" id="editControlRiesgos" multiple>
+                ${wizardData.riesgos
+          .map(
+            (r, i) =>
+              `<option value="${i}" ${c.riesgos.includes(i) ? "selected" : ""
+              }>${r.descripcion}</option>`
+          )
+          .join("")}
+            </select>
+        </div>
+    `;
+      // Inicializa select2 en el select múltiple del modal
+      setTimeout(() => {
+        $("#editControlRiesgos").select2({
+          dropdownParent: $("#modalEditarItem"),
+          width: "100%",
+          placeholder: "Selecciona uno o varios riesgos",
+        });
+      }, 200);
+
+      var modal = new bootstrap.Modal(
+        document.getElementById("modalEditarItem")
+      );
+      modal.show();
+    }
+
+    // Submit handler único para el modal de edición
+    document.getElementById("formEditarItem").onsubmit = function (e) {
+      e.preventDefault();
+      if (tipoEdicionActual === "control") {
+        const c = wizardData.controles[idxEdicionActual];
+        c.nombre = document.getElementById("editControlNombre").value.trim();
+        // c.descripcion = document
+        //   .getElementById("editControlDescripcion")
+        //   .value.trim();
+        c.tipo = document.getElementById("editControlTipo").value;
+        c.efectividad = document.getElementById(
+          "editControlEfectividad"
+        ).value;
+        c.riesgos = $("#editControlRiesgos").val()
+          ? $("#editControlRiesgos").val().map(Number)
+          : [];
+        mostrarControlesAgregados();
+        actualizarOpcionesRiesgosEnControles();
+      } else if (tipoEdicionActual === "riesgo") {
+        const r = wizardData.riesgos[idxEdicionActual];
+        // r.descripcion = document.getElementById("editRiesgoNombre").value.trim();
+        r.descripcion = document
+          .getElementById("editRiesgoDescripcion")
+          .value.trim();
+        r.probabilidad = document.getElementById(
+          "editRiesgoProbabilidad"
+        ).value;
+        r.impacto = document.getElementById("editRiesgoImpacto").value;
+        mostrarRiesgosAgregados();
+        actualizarOpcionesRiesgosEnControles();
+      }
+      $("#modalEditarItem").modal("hide");
+    };
+
+    document.getElementById("btnWizardCerrar").onclick = function () {
+      // Cierra el modal
+      const adminModal = bootstrap.Modal.getInstance(
+        document.getElementById("adminWizardModal")
+      );
+      if (adminModal) adminModal.hide();
+      // Recarga los datos de las tablas principales
+      cargarDatosIniciales();
+    };
+
+    let faseActual = 0;
+    function irAFase(indice) {
+      const fases = document.querySelectorAll(".timeline");
+      if (indice < 0 || indice >= fases.length) return;
+      faseActual = indice;
+      fases.forEach((fase, idx) => {
+        if (idx === faseActual) {
+          fase.classList.add("active");
+          fase.scrollIntoView({ behavior: "smooth", block: "center" });
+        } else {
+          fase.classList.remove("active");
+        }
+      });
+    }
+    // Inicializar la vista mostrando solo la primera fase
+    document.addEventListener("DOMContentLoaded", function () {
+      irAFase(0);
+    });
+
+    document.getElementById("formLoginAdmin").onsubmit = function (e) {
+      e.preventDefault(); // Esto es clave
+      const email = document.getElementById("adminLoginEmail").value.trim();
+      const password = document.getElementById("adminLoginPassword").value;
+      google.script.run
+        .withSuccessHandler(function (valido) {
+          if (valido) {
+            bootstrap.Modal.getInstance(
+              document.getElementById("modalLoginAdmin")
+            ).hide();
+            limpiarWizard();
+            inicializarDatosDelWizard();
+            new bootstrap.Modal(
+              document.getElementById("adminWizardModal")
+            ).show();
+            console.log("Mostrando wizard paso 1");
+            mostrarWizardPaso(1);
+          } else {
+            const err = document.getElementById("adminLoginError");
+            err.textContent = "Correo o contraseña incorrectos.";
+            err.style.display = "block";
+          }
+        })
+        .validarUsuarioAdmin(email, password);
+    };
+
+    // ========== GUARDAR PASO 1 (AGREGADO PARA QUE FUNCIONE EL WIZARD) ==========
+    function guardarPaso1() {
+      console.log('guardarPaso1');
+      const area = document.getElementById("areaNombre").value.trim();
+      const descripcion = document.getElementById("procesoDescripcion").value.trim();
+
+      if (!area) {
+        alert("Debes ingresar el nombre del área.");
+        document.getElementById("areaNombre").focus();
+        return false;
+      }
+      if (!descripcion) {
+        alert("Debes ingresar la descripción del proceso.");
+        document.getElementById("procesoDescripcion").focus();
+        return false;
+      }
+
+      // Guarda los datos en wizardData
+      wizardData.proceso = {
+        area: area,
+        descripcion: descripcion,
+      };
+
+      return true;
+    }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
+</body>
+
+</html>

@@ -7,3 +7,4 @@ from app.db.models.risk import Risk
 from app.db.models.control import Control
 from app.db.models.risk_control import risk_controls
 from app.db.models.activity_log import ActivityLog
+from app.db.models.area import Area
