@@ -1,5 +1,5 @@
 from sqlalchemy import Column, Integer, ForeignKey, Table
-from app.db.base import Base
+from app.db.base_class import Base
 
 risk_controls = Table(
     "risk_controls",
