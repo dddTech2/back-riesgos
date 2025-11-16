@@ -1,20 +1,19 @@
-# Stage 1: Builder
 FROM python:3.11-slim as builder
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install poetry
-RUN pip install poetry
+COPY requirements.txt ./
 
-# Copy poetry config and lock files
-COPY poetry.lock pyproject.toml /app/
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-# Install dependencies
-RUN poetry config virtualenvs.create false && \
-    poetry install --no-dev --no-interaction --no-ansi
-
-# Stage 2: Runner
 FROM python:3.11-slim as runner
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
@@ -22,7 +21,7 @@ WORKDIR /app
 RUN addgroup --system app && adduser --system --group app
 
 # Copy installed dependencies from builder stage
-COPY --from=builder /app /app
+COPY --from=builder /install /usr/local
 
 # Copy the application code
 COPY ./app /app/app
