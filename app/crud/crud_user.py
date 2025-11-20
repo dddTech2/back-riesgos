@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from sqlalchemy.orm import Session
 
@@ -11,6 +11,17 @@ from app.schemas.user import UserCreate, UserUpdate
 class CRUDUser(CRUDBase[User, UserCreate, UserUpdate]):
     def get_by_email(self, db: Session, *, email: str) -> Optional[User]:
         return db.query(User).filter(User.email == email).first()
+
+    def get_multi_by_organization(
+        self, db: Session, *, organization_id: int, skip: int = 0, limit: int = 100
+    ) -> List[User]:
+        return (
+            db.query(self.model)
+            .filter(self.model.organization_id == organization_id)
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
 
     def create(self, db: Session, *, obj_in: UserCreate) -> User:
         role_name = obj_in.role or "user"
@@ -51,6 +62,15 @@ class CRUDUser(CRUDBase[User, UserCreate, UserUpdate]):
         if not verify_password(password, user.password_hash):
             return None
         return user
+
+    def remove(self, db: Session, *, id: int) -> User:
+        obj = db.query(self.model).get(id)
+        if obj:
+            obj.is_active = False
+            db.add(obj)
+            db.commit()
+            db.refresh(obj)
+        return obj
 
 
 
