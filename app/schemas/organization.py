@@ -30,3 +30,4 @@ class OrganizationCreate(BaseModel):
 class NewOrganizationResponse(BaseModel):
     organization: OrganizationResponse
     admin_user: AdminUserResponse
+    temporary_password: str

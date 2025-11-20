@@ -1,6 +1,5 @@
 from typing import List, Optional
 from pydantic import BaseModel, EmailStr
-from app.schemas.role import Role
 
 class UserBase(BaseModel):
     email: EmailStr
@@ -26,7 +25,7 @@ class UserInDBBase(UserBase):
         orm_mode = True
 
 class User(UserInDBBase):
-    roles: List[Role] = []
+    pass
 
 class UserInDB(UserInDBBase):
     password_hash: str

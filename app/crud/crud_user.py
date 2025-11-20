@@ -13,13 +13,15 @@ class CRUDUser(CRUDBase[User, UserCreate, UserUpdate]):
         return db.query(User).filter(User.email == email).first()
 
     def create(self, db: Session, *, obj_in: UserCreate) -> User:
+        role_name = obj_in.role or "user"
+
         db_obj = User(
             email=obj_in.email,
             full_name=obj_in.full_name,
             password_hash=get_password_hash(obj_in.password),
             is_superuser=obj_in.is_superuser,
             organization_id=obj_in.organization_id,
-            role=obj_in.role,
+            role=role_name,
         )
         db.add(db_obj)
         db.commit()

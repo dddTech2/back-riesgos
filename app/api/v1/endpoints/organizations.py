@@ -11,7 +11,7 @@ router = APIRouter()
     "/",
     response_model=schemas.organization.NewOrganizationResponse,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(RoleChecker(["admin"]))],
+    dependencies=[Depends(RoleChecker(["superadmin"]))],
 )
 def create_organization(
     *,

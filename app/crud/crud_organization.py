@@ -11,8 +11,8 @@ from app.core.security import get_password_hash
 # from app.utils.email import send_email_notification
 
 def generate_temporary_password(length: int = 12) -> str:
-    """Genera una contraseña temporal segura."""
-    characters = string.ascii_letters + string.digits + string.punctuation
+    """Genera una contraseña temporal segura sin caracteres especiales problemáticos."""
+    characters = string.ascii_letters + string.digits
     return "".join(random.choice(characters) for i in range(length))
 
 def create_with_initial_admin(db: Session, *, org_in: OrganizationCreate):
@@ -66,7 +66,11 @@ def create_with_initial_admin(db: Session, *, org_in: OrganizationCreate):
         db.refresh(new_organization)
         db.refresh(new_admin)
         
-        return {"organization": new_organization, "admin_user": new_admin}
+        return {
+            "organization": new_organization, 
+            "admin_user": new_admin,
+            "temporary_password": temp_password
+        }
 
     except Exception as e:
         db.rollback()
