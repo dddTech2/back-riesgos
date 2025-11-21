@@ -11,7 +11,17 @@ from app.db.models.user import User
 router = APIRouter()
 
 # Common dependency for admin/super_admin access
-admin_access = RoleChecker(["admin", "super_admin"])
+admin_access = RoleChecker(["admin", "superadmin"])
+
+
+@router.get("/me", response_model=schemas.user.User)
+def read_user_me(
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """
+    Get current user.
+    """
+    return current_user
 
 
 @router.get("/", response_model=List[schemas.user.User], dependencies=[Depends(admin_access)])
@@ -24,7 +34,7 @@ def read_users(
     """
     Retrieve users.
     """
-    if current_user.role == "super_admin":
+    if current_user.role == "superadmin":
         users = crud_user.get_multi(db, skip=skip, limit=limit)
     else:
         # Admin can only see users from their organization
@@ -52,7 +62,7 @@ def create_user(
     """
     Create new user.
     """
-    if current_user.role != "super_admin":
+    if current_user.role != "superadmin":
         # Ensure organization_id is set to current user's organization for non-superadmins
         if not current_user.organization_id:
             raise HTTPException(
@@ -89,7 +99,7 @@ def read_user_by_id(
             detail="User not found",
         )
     if (
-        current_user.role != "super_admin"
+        current_user.role != "superadmin"
         and user.organization_id != current_user.organization_id
     ):
         raise HTTPException(
@@ -117,7 +127,7 @@ def update_user(
             detail="User not found",
         )
     if (
-        current_user.role != "super_admin"
+        current_user.role != "superadmin"
         and user.organization_id != current_user.organization_id
     ):
         raise HTTPException(
@@ -145,7 +155,7 @@ def delete_user(
             detail="User not found",
         )
     if (
-        current_user.role != "super_admin"
+        current_user.role != "superadmin"
         and user.organization_id != current_user.organization_id
     ):
         raise HTTPException(
