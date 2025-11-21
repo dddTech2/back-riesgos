@@ -24,7 +24,7 @@ def create_organization(
     """
     Crea una nueva organización y su administrador inicial.
     
-    Este endpoint solo es accesible para usuarios con el rol 'super_admin'.
+    Este endpoint solo es accesible para usuarios con el rol 'superadmin'.
     """
     result = crud_organization.organization.create_with_initial_admin(db=db, org_in=organization_in)
     return result
