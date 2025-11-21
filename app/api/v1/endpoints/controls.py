@@ -53,7 +53,10 @@ def create_control(
     Create new control.
     """
     control = crud_control.control.create_with_organization_and_risks(
-        db=db, obj_in=control_in, organization_id=current_user.organization_id
+        db=db,
+        obj_in=control_in,
+        organization_id=current_user.organization_id,
+        owner_id=current_user.id,
     )
     return control
 

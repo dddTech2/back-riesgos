@@ -8,7 +8,7 @@ import math
 
 class CRUDControl(CRUDBase[Control, ControlCreate, ControlUpdate]):
     def create_with_organization_and_risks(
-        self, db: Session, *, obj_in: ControlCreate, organization_id: int
+        self, db: Session, *, obj_in: ControlCreate, organization_id: int, owner_id: int
     ) -> Control:
         # Calculate effectiveness
         eff_prob = math.ceil((obj_in.eff_prob_question_1 + obj_in.eff_prob_question_2 + obj_in.eff_prob_question_3) / 3)
@@ -20,6 +20,7 @@ class CRUDControl(CRUDBase[Control, ControlCreate, ControlUpdate]):
             effectiveness_probability=eff_prob,
             effectiveness_impact=eff_imp,
             organization_id=organization_id,
+            owner_id=owner_id,
             assigned_to_id=obj_in.assigned_to_id,
         )
         
