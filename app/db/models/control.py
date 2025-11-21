@@ -15,12 +15,14 @@ class Control(Base):
     effectiveness_probability = Column(Integer, default=0)
     effectiveness_impact = Column(Integer, default=0)
     owner_id = Column(Integer, ForeignKey("users.id"))
+    assigned_to_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     reviewed_at = Column(DateTime(timezone=True), nullable=True)
 
     organization = relationship("Organization")
-    owner = relationship("User")
+    owner = relationship("User", foreign_keys=[owner_id])
+    assigned_to = relationship("User", foreign_keys=[assigned_to_id])
     risks = relationship("Risk", secondary=risk_controls, back_populates="controls")
 
     __table_args__ = (UniqueConstraint('organization_id', 'control_code', name='_organization_control_code_uc'),)

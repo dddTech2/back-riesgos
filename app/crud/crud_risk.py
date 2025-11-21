@@ -42,6 +42,7 @@ class CRUDRisk(CRUDBase[Risk, RiskCreate, RiskUpdate]):
             residual_impact=residual_impact,
             organization_id=organization_id,
             owner_id=owner_id,
+            assigned_to_id=obj_in.assigned_to_id,
         )
         
         db_obj.controls.extend(controls)

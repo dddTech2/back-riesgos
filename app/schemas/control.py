@@ -18,6 +18,7 @@ class ControlCreate(ControlBase):
     eff_imp_question_3: float = Field(..., ge=0, le=1.5)
 
     risk_ids: Optional[List[int]] = []
+    assigned_to_id: Optional[int] = None
 
 class ControlUpdate(BaseModel):
     description: Optional[str] = None
@@ -32,6 +33,7 @@ class ControlUpdate(BaseModel):
     eff_imp_question_3: Optional[float] = Field(None, ge=0, le=1.5)
 
     risk_ids: Optional[List[int]] = None
+    assigned_to_id: Optional[int] = None
 
     @model_validator(mode='after')
     def check_all_or_none_questions(self) -> 'ControlUpdate':
@@ -65,6 +67,7 @@ class ControlUpdate(BaseModel):
 class ControlInDB(ControlBase):
     id: int
     organization_id: int
+    assigned_to_id: Optional[int]
     effectiveness_probability: int
     effectiveness_impact: int
     reviewed_at: Optional[str]

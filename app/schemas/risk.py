@@ -22,6 +22,7 @@ class RiskCreate(RiskBase):
 
     # Optional linked controls
     control_ids: Optional[List[int]] = []
+    assigned_to_id: Optional[int] = None
 
 class RiskUpdate(BaseModel):
     process_name: Optional[str] = None
@@ -40,6 +41,7 @@ class RiskUpdate(BaseModel):
 
     # Optional linked controls
     control_ids: Optional[List[int]] = None
+    assigned_to_id: Optional[int] = None
 
     @model_validator(mode='after')
     def check_all_or_none_questions(self) -> 'RiskUpdate':
@@ -74,6 +76,7 @@ class RiskUpdate(BaseModel):
 class RiskInDB(RiskBase):
     id: int
     organization_id: int
+    assigned_to_id: Optional[int]
     inherent_probability: int
     inherent_impact: int
     residual_probability: Optional[int]

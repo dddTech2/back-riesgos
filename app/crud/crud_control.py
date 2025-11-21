@@ -20,6 +20,7 @@ class CRUDControl(CRUDBase[Control, ControlCreate, ControlUpdate]):
             effectiveness_probability=eff_prob,
             effectiveness_impact=eff_imp,
             organization_id=organization_id,
+            assigned_to_id=obj_in.assigned_to_id,
         )
         
         if obj_in.risk_ids:
@@ -76,6 +77,8 @@ class CRUDControl(CRUDBase[Control, ControlCreate, ControlUpdate]):
             db_obj.description = update_data["description"]
         if "type" in update_data:
             db_obj.type = update_data["type"]
+        if "assigned_to_id" in update_data:
+            db_obj.assigned_to_id = update_data["assigned_to_id"]
 
         # Update associated risks
         if "risk_ids" in update_data:
